@@ -473,8 +473,12 @@ pub fn lifecycle(acpi: Option<&coco_acpi::AcpiInfo>, cycles: u8, prior_failures:
     Err("power-off did not happen")
 }
 
-fn free_frames() -> u64 {
-    crate::mm::with(|m| m.frames.free_frames()).unwrap_or(0)
+/// Frames that are free or held by the kernel heap. The heap keeps the
+/// pages it grows into (documented), so a lifecycle test's leak invariant
+/// is that this sum is unchanged: anything else is a real leak.
+fn unleaked_frames() -> u64 {
+    let heap_frames = heap::stats().map_or(0, |h| (h.mapped / 4096) as u64);
+    crate::mm::with(|m| m.frames.free_frames()).unwrap_or(0) + heap_frames
 }
 
 /// Kernel threads: yielders and pure spinners must all make progress
@@ -490,7 +494,7 @@ pub fn threads_suite() -> TestResult {
     // Warm-up: creates the page tables backing the first stack slots.
     let warm = sched::spawn_kernel("warm-up", || {}).map_err(|_| "spawn failed")?;
     sched::join(warm);
-    let frames0 = free_frames();
+    let frames0 = unleaked_frames();
     let heap0 = heap_in_use();
 
     // Fixed-size bookkeeping so the test itself does not skew the heap
@@ -559,7 +563,7 @@ pub fn threads_suite() -> TestResult {
     ensure(CHURN.load(Ordering::Relaxed) == 300, "churn threads did not all run")?;
     sched::reap();
     let (threads, switches) = sched::stats();
-    ensure(free_frames() == frames0, "frames leaked by thread lifecycle")?;
+    ensure(unleaked_frames() == frames0, "frames leaked by thread lifecycle")?;
     ensure(heap_in_use() == heap0, "heap leaked by thread lifecycle")?;
     kprintln!(
         "  threads: counters {:?}, spinner fairness {}:{}, {} switches in 30 ticks; switch cost {} cyc ({} ns); 300 spawn/join ok; live threads {}, total switches {}",
@@ -589,7 +593,7 @@ pub fn user_suite(image: &[u8]) -> TestResult {
     };
     // Warm-up (creates shared kernel tables for stack slots).
     ensure(run(m::HELLO, 0)? == Status::Exited(0), "hello did not exit(0)")?;
-    let frames0 = free_frames();
+    let frames0 = unleaked_frames();
     let heap0 = heap_in_use();
 
     // Preemption across processes: a spinner that never yields must not
@@ -635,7 +639,7 @@ pub fn user_suite(image: &[u8]) -> TestResult {
     }
     crate::sched::reap();
     ensure(process::count() == 0, "process records leaked")?;
-    let frames = free_frames();
+    let frames = unleaked_frames();
     let heap = heap_in_use();
     kprintln!(
         "  user: hello finished at tick {} while spinner ran to tick {}; 6 faulting programs killed; 2 syscall fuzzers survived; 120 processes churned; frames {} -> {}, heap {} -> {} B",
@@ -665,7 +669,7 @@ pub fn soak(image: &[u8], seconds: u64) -> TestResult {
     ensure(process::wait(warm) == Some(Status::Exited(0)), "warm-up failed")?;
     let t = sched::spawn_kernel("warm", || {}).map_err(|_| "spawn failed")?;
     sched::join(t);
-    let frames0 = free_frames();
+    let frames0 = unleaked_frames();
     let heap0 = heap_in_use();
     let end = interrupts::ticks() + seconds * interrupts::HZ;
     static WORK: AtomicU64 = AtomicU64::new(0);
@@ -695,11 +699,11 @@ pub fn soak(image: &[u8], seconds: u64) -> TestResult {
         sched::reap();
         processes += 9;
         rounds += 1;
-        if free_frames() != frames0 || heap_in_use() != heap0 {
+        if unleaked_frames() != frames0 || heap_in_use() != heap0 {
             kprintln!(
                 "  soak: round {}: frames {} (baseline {}), heap {} (baseline {})",
                 rounds,
-                free_frames(),
+                unleaked_frames(),
                 frames0,
                 heap_in_use(),
                 heap0
@@ -745,26 +749,24 @@ pub fn ipc_suite(image: &[u8]) -> TestResult {
     ensure(!image.is_empty(), "no init.elf loaded")?;
     ipc_round(image)?;
     sched::reap();
-    let frames0 = free_frames();
-    let heap0 = heap::stats().unwrap_or_default();
+    let frames0 = unleaked_frames();
+    let heap0 = heap_in_use();
     ipc_round(image)?;
     sched::reap();
     let channels = ipc::live_channels();
-    let frames = free_frames();
-    let heap1 = heap::stats().unwrap_or_default();
-    let heap_growth_frames = (heap1.mapped.saturating_sub(heap0.mapped) / 4096) as u64;
+    let frames = unleaked_frames();
+    let heap1 = heap_in_use();
     kprintln!(
-        "  ipc: 2 rounds (echo pair, 21 capability checks, kill-cleanup, cycle refused + chain released, 2 IPC fuzzers); live channels {}, frames {} -> {} (heap grew {} frames), heap in use {} -> {} B",
+        "  ipc: 2 rounds (echo pair, 21 capability checks, kill-cleanup, cycle refused + chain released, 2 IPC fuzzers); live channels {}, frames (free + heap) {} -> {}, heap in use {} -> {} B",
         channels,
         frames0,
         frames,
-        heap_growth_frames,
-        heap0.in_use,
-        heap1.in_use
+        heap0,
+        heap1
     );
     ensure(channels == 0, "channels leaked")?;
-    ensure(frames + heap_growth_frames == frames0, "frames leaked")?;
-    ensure(heap1.in_use == heap0.in_use, "heap leaked")
+    ensure(frames == frames0, "frames leaked")?;
+    ensure(heap1 == heap0, "heap leaked")
 }
 
 fn ipc_round(image: &[u8]) -> TestResult {
