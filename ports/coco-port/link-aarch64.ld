@@ -1,0 +1,4 @@
+OUTPUT_ARCH(aarch64)
+ENTRY(_start)
+KERNEL_BASE = 0x40200000;
+INCLUDE link-common.ld

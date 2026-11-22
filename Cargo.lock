@@ -61,6 +61,10 @@ name = "coco-elf"
 version = "0.1.0"
 
 [[package]]
+name = "coco-fdt"
+version = "0.1.0"
+
+[[package]]
 name = "coco-init"
 version = "0.1.0"
 dependencies = [
@@ -91,6 +95,18 @@ dependencies = [
 [[package]]
 name = "coco-memory"
 version = "0.1.0"
+
+[[package]]
+name = "coco-port"
+version = "0.1.0"
+dependencies = [
+ "coco-abi",
+ "coco-capability",
+ "coco-fdt",
+ "coco-ipc",
+ "coco-memory",
+ "coco-sync",
+]
 
 [[package]]
 name = "coco-sync"

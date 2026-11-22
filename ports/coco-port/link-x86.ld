@@ -1,0 +1,4 @@
+OUTPUT_ARCH(i386)
+ENTRY(_start)
+KERNEL_BASE = 0x100000;
+INCLUDE link-common.ld
