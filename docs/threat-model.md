@@ -36,8 +36,14 @@ future user data, and availability of the boot path.
 | Malformed ACPI tables | checksums enforced, bounded lengths/lists, checked arithmetic, no `unsafe` | host tests, 31 M fuzz runs |
 | Future user-space access/exec from kernel | SMEP, SMAP, UMIP enabled when supported | `protections` self-test |
 | IST stack overflow corrupting neighbours | guard pages | `protections` self-test |
+| User process reading/writing kernel memory | separate page tables, no USER bit on kernel pages, SMEP/SMAP | `user-isolation` (kernel read killed) |
+| User process crashing the kernel | CPL-3 exceptions kill only the process | 6 fault classes in `user-isolation` |
+| Malicious syscall arguments | range + mapping checks, copies inside STAC/CLAC, bounded lengths, unknown numbers rejected | 2 fuzz processes, ≈18.4 k random hostile syscalls each |
+| Kernel data leaking to user space | registers zeroed on entry, restored on syscall return, x87/SSE state saved per thread, AVX disabled, fresh frames zeroed | code review (`docs/adr/0013`) |
+| SYSRET non-canonical RCX attack | RCX validated before `sysret` | code review |
+| User code disabling SMAP for the kernel (RFLAGS.AC) | FMASK clears AC on syscall entry | code review |
 
 ## Not yet addressed (by design of the milestone order)
-User/kernel separation, syscall validation, capabilities, IOMMU/DMA
-isolation, KASLR, stack canaries, secure randomness, signed updates and
-rollback protection. None of these are claimed.
+Capabilities and least-privilege permissions (M4), IOMMU/DMA isolation,
+KASLR, stack canaries, secure randomness, resource quotas per process,
+signed updates and rollback protection. None of these are claimed.

@@ -27,6 +27,10 @@
 * `test=memory` — frame allocator, paging, protection policy, heap churn,
   timer accuracy and #BP self-tests.
 * `test=heap` — heap churn plus exhaustion/recovery (consumes free frames).
+* `test=threads` — kernel-thread fairness, context-switch cost, 300-thread churn.
+* `test=user` — user processes: preemption across processes, 6 fault
+  classes killed, 2 syscall fuzzers, 120-process churn, leak checks.
+* (no `test=`) — boots and runs `\coco\init.elf` as pid 1.
 * `test=timer` — 100 ticks measured against the TSC.
 * `test=lifecycle cycles=N` — run the memory suite, reboot via ACPI until N
   boots are counted in CMOS, then power off via ACPI S5.

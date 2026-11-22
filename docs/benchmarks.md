@@ -8,12 +8,13 @@ Since M2 the TSC is calibrated against the ACPI PM timer (measured
 
 ## Binary and image size
 
-| Artifact | M1 (`0c9c263`) | M2 (`b60418a`) |
-|---|---:|---:|
-| `BOOTX64.EFI` (loader) | 31,232 | 31,232 |
-| `kernel.elf` | 41,664 | 90,992 |
-| Installed base (cluster-rounded) | 75,264 | **124,416** of 108,000,000 |
-| Kernel image in memory (text + rodata + data/bss) | 88 KiB | 156 KiB (62 + 12 + 72, incl. 3 IST guard pages) |
+| Artifact | M1 (`0c9c263`) | M2 (`b60418a`) | M3 (`c89325a`) |
+|---|---:|---:|---:|
+| `BOOTX64.EFI` (loader) | 31,232 | 31,232 | 32,256 |
+| `kernel.elf` | 41,664 | 90,992 | 132,160 |
+| `init.elf` (first user program) | — | — | 12,648 |
+| Installed base (cluster-rounded) | 75,264 | 124,416 | **179,712** of 108,000,000 |
+| Kernel image in memory (text + rodata + data/bss) | 88 KiB | 156 KiB | 196 KiB |
 
 The M2 growth comes from the heap and `alloc` collections, ACPI parsing,
 APIC/timer code and the in-kernel self-tests (which ship in the same
@@ -74,12 +75,26 @@ calibration busy-wait) · total kernel 166.5 M (≈79 ms).
 interrupts. Calibrated rates: TSC 2,102–2,108 MHz, APIC timer
 62.6–62.8 MHz after the ÷16 divider.
 
+## Scheduler and processes (M3, revision `c89325a`, TCG)
+
+| Measurement | Value |
+|---|---:|
+| Context switch (yield ping-pong between two kernel threads, incl. FXSAVE/FXRSTOR) | 4,160 cycles (≈1,979 ns at 2.1 GHz TSC) |
+| Fairness: two never-yielding spinners over 30 ticks | 837,405 : 886,065 iterations (1.06×) |
+| Context switches during that phase (4 threads + main) | 70 |
+| Cross-process preemption | `init` hello finished at tick 2 while a spinning process ran until tick 32 |
+| Thread churn | 300 spawn/join: frames and heap exactly back to baseline |
+| Process churn | 120 processes (100 sequential, 20 concurrent): frames 63,403 → 63,403, heap 27,648 → 27,648 B |
+| Hostile syscalls | 2 fuzz processes, 20,000 draws each (draws of `exit` skipped): 6,312 + 12,123 and 6,150 + 12,342 (succeeded + rejected with a valid error code); both processes exited 0 |
+| Kernel-half pre-population | 252 level-3 tables (≈1 MiB) |
+
 ## Idle CPU (host CPU used by QEMU over 10 s after boot)
 
 | Kernel state | Host CPU |
 |---|---:|
 | M1: `cli; hlt` (no interrupts) | 0.3% |
 | M2: `sti; hlt` with 100 Hz APIC tick | 1.3% |
+| M3: scheduler + idle thread, 100 Hz tick | 1.2% |
 
 ## Not yet measurable
 

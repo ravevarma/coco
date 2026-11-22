@@ -1,20 +1,20 @@
-# coco quality report — M2 (kernel memory, interrupts, timer, ACPI, power)
+# coco quality report — M3 (threads, scheduler, processes, syscalls, isolation)
 
 **Release decision: EXPERIMENTAL — NOT RELEASE READY.**
 Every gate that applies to the implemented scope passes on revision
-`b60418a`. The build is not a release: processes, user mode, drivers,
-signed boot and hardware testing do not exist yet, and two implemented
-code paths (x2APIC, HPET fallback) could not be exercised in this
-environment. Nothing here claims the system is free of defects.
+`c89325a`. coco is not a release: there is no IPC, capability model,
+filesystem, driver set, signed boot or hardware validation, and some code
+paths (x2APIC, HPET fallback) cannot be exercised in this environment.
+Nothing here claims the system is free of defects.
 
-The M0/M1 report for `0c9c263` is preserved in git history
-(`git show 2f2a915:docs/quality-report.md`).
+Earlier reports: M0/M1 `git show 2f2a915:docs/quality-report.md`,
+M2 `git show 778ece7:docs/quality-report.md`.
 
 ## Environment
 
 | Item | Version |
 |---|---|
-| Source revision tested | `b60418a` (all gates re-run from `cargo clean`) |
+| Source revision tested | `c89325a` (all gates re-run from `cargo clean`) |
 | Rust (shipped artifacts) | `rustc 1.97.0 (2d8144b78 2026-07-07)`, pinned |
 | Rust (Miri, fuzzing) | `rustc 1.102.0-nightly (bdf712ee8 2026-11-21)`, cargo-fuzz |
 | QEMU / firmware | QEMU 8.2.2 TCG (no KVM); OVMF 2024.02-2ubuntu0.10 |
@@ -24,79 +24,91 @@ The M0/M1 report for `0c9c263` is preserved in git history
 
 | Gate | Result |
 |---|---|
-| rustfmt; clippy `-D warnings` (host crates, loader target, kernel target); rustdoc `-D warnings` | ✅ PASS |
-| Host unit + property tests (debug and release) | ✅ 60/60 each (`coco-abi` 15, `coco-acpi` 11, `coco-arch` 3, `coco-elf` 8, `coco-memory` 18, `coco-sync` 2, `xtask` 3) |
-| Miri, all 6 host library crates | ✅ 57/57, no UB reported (re-run at M2: `coco-acpi` 11 + `coco-memory` 18; `coco-abi` 15, `coco-arch` 3, `coco-elf` 8, `coco-sync` 2 unchanged since their `0c9c263` run) |
-| Loom (`SpinLock`) | ✅ 2/2; mutation (Relaxed) detected |
-| Fuzzing | ✅ 0 crashes: `acpi_tables` 31,452,968 runs (new); `elf_parse`, `memory_map`, `boot_info` 104.1 M runs at `0c9c263` (code unchanged) |
-| QEMU/OVMF matrix | ✅ **30/30** cases in 32 runs (`selftest-256M` ×3); the lifecycle case alone boots the kernel 3 times |
-| Reproducible build | ✅ loader, kernel, ESP and disk image bit-identical across two checkouts |
-| Base size ≤ 108,000,000 B | ✅ 124,416 B |
+| rustfmt; clippy `-D warnings` on host crates, loader, kernel and the user program; rustdoc `-D warnings` | ✅ 8/8 |
+| Host unit + property tests (debug and release) | ✅ 64/64 each (`coco-abi` 18, `coco-acpi` 11, `coco-arch` 3, `coco-elf` 8, `coco-memory` 19, `coco-sync` 2, `xtask` 3) |
+| Miri | ✅ no UB: re-run at M3 for the changed crates `coco-abi` 18 + `coco-memory` 19; `coco-acpi` 11 at `b60418a`; `coco-arch` 3, `coco-elf` 8, `coco-sync` 2 at `0c9c263` (unchanged since) |
+| Loom (`SpinLock`) | ✅ 2/2 (crate unchanged since M2) |
+| Fuzzing | ✅ 0 crashes: `boot_info` 21,736,346 runs at M3 (BootInfo v2); `acpi_tables` 31.5 M (M2); `elf_parse`, `memory_map` 26.3 M / 47.5 M (M1; unchanged code) |
+| QEMU/OVMF matrix | ✅ **30 cases, 32/32 runs** (`selftest-256M` runs 3×; the lifecycle case boots the kernel 3 times) |
+| Reproducible build | ✅ loader, kernel, ESP (incl. `init.elf`) and disk image bit-identical across two checkouts |
+| Base size ≤ 108,000,000 B | ✅ 179,712 B |
 | Third-party code in shipped binaries | ✅ none |
 
-## New in M2 and how it was verified
+## New in M3 and how it was verified
 
-| Feature | Verification |
+| Feature | Evidence |
 |---|---|
-| Kernel heap (size classes + coalescing runs, double-free detection, poisoning) | 7 host tests incl. a 40,000-step model test checking overlap, alignment, contents and accounting; OOM + recovery; use-after-free write detection; Miri. In-kernel: 3 churn rounds (~217 k ops) returning exactly to baseline; exhaustion to clean OOM (496 MiB) and full recovery |
-| Allocation in interrupt context refused | `irq-alloc-refused`: refusal message + controlled abort |
-| ACPI (RSDP/XSDT/RSDT, MADT, FADT, HPET, `_S5`) | 11 host tests incl. 20,000 random corruptions; Miri; 31.5 M fuzz runs from a valid seed; QEMU: 1 and 4 CPUs detected correctly |
-| IDT 256 vectors, PIC masked, local APIC, IRQ-safe locks | all M2 QEMU cases; 0 unexpected interrupts |
-| TSC/APIC-timer calibration and 100 Hz tick | `timer`: 100 ticks = 1,000–1,001 ms by TSC |
-| IST guard pages; SMEP/SMAP/UMIP | `protections` self-test; `-cpu qemu64` correctly reports them absent |
-| ACPI reset, S5 power-off, boot/reboot/power-off lifecycle | `lifecycle-3-boots` (memory suite passes on every boot; CMOS counter survives resets; QEMU exits 0 on S5); `shutdown` |
+| Kernel threads, context switch with FXSAVE, guard-paged stacks | `threads`: all 4 threads progressed; 300 spawn/join cycles; frames and heap exactly at baseline |
+| Timer preemption, fairness | Two never-yielding spinners: 837,405 vs 886,065 iterations |
+| Context-switch cost | 4,160 cycles per switch (TCG) |
+| User processes, ring-3 entry, `init.elf` from the loader | `boot-default`: `init: hello from user space, pid 1`, exit 0 |
+| Cross-process preemption | hello finished at tick 2 while a spinner process ran to tick 32 |
+| Fault isolation | null deref (#PF 0x4), kernel read (#PF 0x5), `cli` (#GP), execute stack (#PF 0x15), write to text (#PF 0x7), user stack overflow (#PF 0x6): each process killed, kernel continued |
+| Syscall validation | 2 fuzz processes (≈18.4 k hostile calls each) exited 0; every result was a success value or a defined error code |
+| Process lifecycle without leaks | 120 processes (100 sequential, 20 concurrent) with correct exit codes; frames 63,403 → 63,403, heap 27,648 → 27,648 B |
+| Address-space teardown | host test (every leaf and table frame returned exactly once, kernel half intact) + Miri + in-kernel churn |
 
 ## Memory findings
-* No leaks: heap in-use returns to the exact baseline after every churn
-  round and after exhaustion; frame-allocator counts are restored after
-  full exhaustion (63,679 frames at 256 MiB, 1,046,623 at 4 GiB); the
-  allocated-frame count is constant across 2,000 map/unmap cycles.
-* OOM is a clean error at both layers (frames and heap) and both recover.
-* Known, documented retention: heap memory is not returned to the frame
-  allocator (8.9 MiB stays mapped after the churn test).
+* No leaks in thread or process lifecycles (exact frame and heap
+  accounting above), in addition to the M1/M2 allocator and heap checks.
+* Address-space teardown frees frames without heap allocation while the
+  memory lock is held. This was a lock-order defect in the first draft,
+  caught in review before it ran (see below).
 
 ## Unsafe-code audit
-175 `unsafe` blocks (arch 28, loader 45, kernel 77, memory 21, sync 4);
-`coco-abi`, `coco-acpi` and `coco-elf` contain none. All carry `SAFETY:`
-justifications with one unsafe operation each (lint-enforced) and were
-reviewed against `docs/kernel-safety-invariants.md` (new: M9 MMIO, M10
-heap, C3 interrupt rules, L1/L3 locking). Heap header casts go through two
-helpers that state and debug-assert the alignment invariant.
+223 `unsafe` blocks (arch 31, loader 46, kernel 116, memory 21, sync 4,
+user program 5); `coco-abi`, `coco-acpi` and `coco-elf` contain none.
+All have a `SAFETY:` justification and a single unsafe operation each
+(lint-enforced) and were reviewed against
+`docs/kernel-safety-invariants.md`, which gains C5/C6 (per-CPU block, GS),
+L5 (no lock across a switch), T1–T2 (threads), P1 (address spaces) and
+U1–U3 (user memory, return to user, fault containment).
 
 ## Concurrency audit
-* Interrupts are now live (APIC timer). All kernel-global locks are
-  `IrqSpinLock`s; handlers take no locks and do not allocate.
-* Lock order `HEAP → MEMORY → CONSOLE`; the only nested acquisition is heap
-  growth taking `MEMORY`. Trap/panic paths remain non-blocking (L2,
-  `fault-with-console-locked`).
-* Still single-CPU: data races across CPUs, priority inversion and
-  starvation become testable with SMP and the scheduler (M3).
+* Preemption happens only outside `IrqSpinLock` critical sections.
+  `SCHED` is never held across a switch: raw pointers to the two thread
+  records are taken under the lock and used with interrupts disabled.
+* Lock order `SCHED → HEAP → MEMORY → CONSOLE`; `PROCESSES` is never
+  combined with another lock. The tick path takes only `SCHED` and never
+  allocates (queue capacity is reserved).
+* Single CPU: cross-CPU races, TLB shootdown and per-CPU scheduling become
+  relevant with SMP bring-up.
 
-## Defects found and fixed during M2
-1. Heap model test hit OOM: diagnosed as genuine exhaustion (8,347,488 of
-   8,388,608 bytes in use) caused by an alloc-biased test; live set bounded.
-2. QEMU expectations out of date after unified test reporting (2 cases).
-3. x2APIC "force" case could not pass: QEMU 8.2 TCG does not implement
-   x2APIC. The kernel correctly refused (CPUID check); the case now tests
-   that fallback and the x2APIC path is reported **unverified**.
-4. Self-test label claimed "tables retained" for a total allocated-frame
-   count; relabelled (the leak check itself was correct).
-5. Lints: unchecked arithmetic (ACPI root count), alignment casts (heap),
-   double unsafe ops (HPET config), collapsible conditions.
-6. A benchmark table was briefly edited with values that did not match the
-   logs; caught during review and replaced with the gate-run values.
+## Defects found and fixed during M3
+1. **Lock-order defect (caught in review, never ran):** the first draft of
+   address-space teardown collected frames into `Vec`s while holding
+   `MEMORY`, which could deadlock if the heap needed to grow. It now frees
+   frames from the teardown callbacks.
+2. **Unsound draft (caught in review, never ran):** `set_kernel_stack`
+   briefly formed a `&mut` to the CPU tables (violating C1); replaced with
+   raw-pointer, unaligned writes.
+3. The thread test counted its own `Vec`s as leaks (false positive); the
+   test now uses fixed-size bookkeeping.
+4. A self-test label reported all context switches as "in 30 ticks";
+   corrected to the measured phase (70 switches).
+5. The user-isolation test took 35 s because fuzzed `sleep` calls slept
+   about 1,500 ticks; `sleep(0)` now yields (documented ABI), and the case
+   takes 9 s.
+6. Lints: missing/invalid SAFETY comments, double unsafe operations, a
+   rustdoc link (`STAR[63:48]`).
+7. Documentation: two wrong numbers I typed were caught against the logs
+   before commit (an `unsafe fn` count of 18 instead of 17; the syscall
+   fuzz success counts).
+8. **Correction to the M2 report (`778ece7`):** it stated "30/30 cases in
+   32 runs". The QEMU harness counts runs: M2 had **28 cases in 30 runs**.
+   All of them passed; only the count was wrong.
 
-## Not run / unverified (reported as such, not as passed)
+## Not run / unverified
 | Item | Reason |
 |---|---|
-| x2APIC register path | QEMU 8.2 TCG lacks x2APIC |
-| HPET calibration fallback | q35 always provides the PM timer |
-| Process/IPC/application lifecycle tests | not implemented yet (M3+) |
-| Long-duration (hours) memory-growth soak | not run; idle heap is static (1 allocation) |
+| x2APIC register path; HPET fallback | not available under QEMU 8.2 TCG / q35 |
+| User mode on a CPU without SMAP (non-STAC copy path) | user tests run with `-cpu max` only |
+| Multi-threaded processes, IPC, capabilities | not implemented (M3 follow-ups / M4) |
+| Long-duration soak | not run |
 | Physical hardware, Secure Boot | unavailable |
 | Dependency advisory scan | no tool installed; zero third-party crates ship |
 
 ## Performance and size
-See `docs/benchmarks.md`. Highlights: base 124,416 B; kernel steady-state
-RAM ≈400 KiB at 256 MiB; idle 1.3% host CPU with a 100 Hz tick; boot to
-kernel entry ≈2.1 s and kernel init ≈79 ms under TCG.
+See `docs/benchmarks.md`: base 179,712 B; context switch ≈4.2 k cycles;
+idle 1.2% host CPU with scheduler and 100 Hz tick; boot to kernel entry
+≈2.0–2.2 s under TCG.

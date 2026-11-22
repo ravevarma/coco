@@ -6,12 +6,13 @@ coco is an independent operating system for x86_64 UEFI machines, written
 from scratch in Rust: its own UEFI loader, its own kernel, its own boot
 protocol — no Linux, BSD, XNU, Windows or Redox underneath.
 
-> **Status: M0–M2 complete — EXPERIMENTAL, NOT RELEASE READY.**
-> coco boots in QEMU/OVMF to a framebuffer splash and serial console, with
-> exception handling, a frame allocator, page-table mapper and hardened
-> kernel heap, ACPI discovery, a calibrated APIC timer with interrupts, and
-> ACPI reboot/power-off. It has no scheduler, processes, drivers or
-> applications yet and has never run on physical hardware.
+> **Status: M0–M3 complete — EXPERIMENTAL, NOT RELEASE READY.**
+> coco boots in QEMU/OVMF and runs its first user program as pid 1. It has
+> exception handling, a frame allocator, page tables and a hardened heap,
+> ACPI discovery, a calibrated APIC timer, a preemptive scheduler, isolated
+> user processes with system calls, and ACPI reboot/power-off. It has no
+> IPC, filesystem, drivers or applications yet and has never run on
+> physical hardware.
 > See [docs/quality-report.md](docs/quality-report.md).
 
 ![coco boot screen in QEMU](docs/images/boot-splash.png)
@@ -21,7 +22,8 @@ protocol — no Linux, BSD, XNU, Windows or Redox underneath.
 | Component | Path | Notes |
 |---|---|---|
 | UEFI loader | `boot/` | reads and validates the kernel, builds W^X page tables, exits boot services, hands off |
-| Kernel | `kernel/` | GDT/TSS/IDT (256 vectors, guarded IST), fault diagnostics, framebuffer console, frame allocator, heap, ACPI, local APIC + 100 Hz timer, reboot/S5, self-tests |
+| Kernel | `kernel/` | GDT/TSS/IDT (256 vectors, guarded IST), fault diagnostics, framebuffer console, frame allocator, heap, ACPI, local APIC + 100 Hz timer, preemptive scheduler, processes, SYSCALL/SYSRET, reboot/S5, self-tests |
+| First user program | `user/init/` | ring-3 `init` (pid 1); also the user-mode test workload |
 | ACPI parser | `crates/coco-acpi/` | RSDP/XSDT/MADT/FADT/HPET/`_S5`, no allocation, no `unsafe`, fuzzed |
 | Boot protocol | `crates/coco-abi/` | versioned `BootInfo`, memory map normalisation, cmdline parsing |
 | ELF parser | `crates/coco-elf/` | strict, allocation-free, fuzzed |
@@ -30,7 +32,7 @@ protocol — no Linux, BSD, XNU, Windows or Redox underneath.
 | Arch | `arch/x86_64/` | privileged instructions, descriptors, 16550 UART |
 | Tooling | `tools/xtask/` | build, GPT/FAT image, size gate, QEMU test matrix, reproducibility check |
 
-Base image today: **124,416 bytes** of the 108,000,000-byte budget
+Base image today: **179,712 bytes** of the 108,000,000-byte budget
 (see [docs/size-report.md](docs/size-report.md)).
 
 ## Quick start

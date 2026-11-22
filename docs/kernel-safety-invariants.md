@@ -7,13 +7,14 @@ deny`). `unsafe_op_in_unsafe_fn` is denied, so unsafe functions also need
 explicit blocks. This document lists the invariants those justifications
 rely on.
 
-## Inventory (M2, revision b60418a)
+## Inventory (M3, revision c89325a)
 
 | Crate | `unsafe {}` blocks | `unsafe fn` | `unsafe impl` | Purpose |
 |---|---:|---:|---:|---|
-| `coco-arch-x86_64` | 28 | 15 | 0 | privileged instructions, port I/O, UART, CR4, interrupt flag |
-| `coco-boot` | 45 | 1 | 1 | UEFI FFI, page-table construction, handoff |
-| `coco-kernel` | 77 | 1 | 5 | descriptor tables, APIC/HPET/PM-timer/CMOS/PIC I/O, framebuffer, boot-info read, allocator glue, self-tests |
+| `coco-arch-x86_64` | 31 | 17 | 0 | privileged instructions, port I/O, UART, CR4, interrupt flag, FXSAVE |
+| `coco-boot` | 46 | 1 | 1 | UEFI FFI, page-table construction, handoff, init image copy |
+| `coco-kernel` | 116 | 1 | 6 | descriptor tables, APIC/HPET/PM-timer/CMOS/PIC I/O, framebuffer, boot-info read, allocator glue, context switch, ring-3 entry, syscall entry and user copies, self-tests |
+| `coco-init` (user) | 5 | 0 | 0 | `syscall` instruction, deliberate faults for isolation tests |
 | `coco-memory` | 21 | 4 | 1 (+1 unsafe trait) | page-table entries, frame tokens, heap free lists |
 | `coco-sync` | 4 | 0 | 2 | lock guard dereference |
 | `coco-abi`, `coco-acpi`, `coco-elf` | **0** | 0 | 0 | untrusted-input parsers are 100% safe Rust |
@@ -69,8 +70,14 @@ rely on.
   (vectors ≥ 32) run with `IN_INTERRUPT` raised, take no locks and never
   allocate (the allocator refuses and reports). Only the APIC timer is
   unmasked.
-* **C4 — CPL 0 only.** All `coco_arch::cpu` register reads assume ring 0;
-  there is no user mode yet.
+* **C4 — CPL 0 only.** `coco_arch::cpu` register accesses run only in the
+  kernel; user code reaches the kernel only through SYSCALL and exceptions.
+* **C5 — Per-CPU block / TSS.RSP0.** Written only during a context switch
+  (interrupts disabled); read by the syscall stub with IF cleared by FMASK.
+  C1 is amended accordingly: RSP0 is the one TSS field written after init.
+* **C6 — GS.** The kernel never uses GS; `swapgs` is executed only around
+  the two per-CPU accesses in the syscall stub, so GS is always the user
+  value while kernel code runs (including in interrupt handlers).
 
 ## Locks and interrupt context
 
@@ -81,9 +88,35 @@ rely on.
   `try_lock` and fall back to the lock-free UART path
   (`SerialPort::assume_init`). Verified by the `fault-with-console-locked`
   QEMU test.
-* **L3 — Lock order.** `HEAP` → `MEMORY` → `CONSOLE`. The heap grows by
-  taking `MEMORY`; code holding `MEMORY` never allocates; printing under
-  either is allowed. New locks must be added here.
+* **L3 — Lock order.** `SCHED` → `HEAP` → `MEMORY` → `CONSOLE`; `PROCESSES`
+  is never held together with another lock. The heap grows by taking
+  `MEMORY`; code holding `MEMORY` never allocates (address-space teardown
+  frees frames from callbacks for this reason); the timer path takes only
+  `SCHED` and never allocates.
+* **L5 — No lock across a context switch.** `switch_away` computes raw
+  pointers to the old/new thread records under `SCHED`, releases it, then
+  switches with interrupts disabled; nothing else can run (single CPU)
+  until the switch completes, so the pointers stay valid.
+
+## Threads, processes and user memory
+
+* **T1 — Stacks.** Each thread stack is owned by exactly one thread record
+  and freed only by `reap`, which never reaps the running thread.
+* **T2 — Fresh threads** start from a prepared frame (`coco_thread_start`)
+  with interrupts disabled; kernel bodies enable them first; user threads
+  enter ring 3 via `iretq` with IF set and all other GPRs zeroed.
+* **P1 — Address spaces.** A process PML4's user half is touched only by
+  `map_user_page`, `translate_in` and `teardown_user` under `MEMORY`; it is
+  torn down only after the process's thread is dead (so it is not live).
+* **U1 — User memory.** The kernel reads user memory only through
+  `copy_from_user`: range check (`validate_user_range`), present+USER
+  check of every page in the caller's tables, copy inside `stac`/`clac`.
+  Processes are single-threaded, so the checked mappings cannot change
+  during the copy.
+* **U2 — Return to user.** Every caller-saved register is restored from the
+  syscall frame; RCX must be below `USER_TOP` or the process is killed.
+* **U3 — Fault containment.** Exceptions with CPL 3 in the saved CS kill the
+  current process; exceptions at CPL 0 remain fatal kernel errors.
 * **L4 — Ordering.** `SpinLock` acquires with `Acquire` and releases with
   `Release`; Loom verifies the protocol and detects a weakened variant
   (mutation test recorded in `docs/quality-report.md`).

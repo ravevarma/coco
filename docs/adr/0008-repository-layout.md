@@ -9,6 +9,8 @@ Deviations from the suggested tree, each with a reason:
   loader binary.
 * `crates/coco-sync` (added): synchronization primitives are shared by the
   kernel and must be model-checked with Loom on the host.
+* `user/init` (added, M3): the first user program; until coco has a
+  filesystem it doubles as the user-mode test workload.
 * `crates/coco-acpi` (added, M2): firmware tables are untrusted input and
   need host tests, Miri and fuzzing separate from the kernel.
 * `arch/x86_64` is the package `coco-arch-x86_64` (lib name `coco_arch`).

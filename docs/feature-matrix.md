@@ -26,7 +26,14 @@ Legend: ✅ implemented and tested · 🟡 partial · ⬜ not started.
 | M2 | Reboot (ACPI reset) and power-off (S5); lifecycle | ✅ | `lifecycle-3-boots`, `shutdown` |
 | M2 | Tickless idle, HPET as clock source | ⬜ | |
 | M2 | Demand paging, CoW, shared memory, quotas, reclamation, DMA buffers | ⬜ | with M3/M5 (need processes/drivers) |
-| M3 | Threads, scheduler, processes, syscalls, user mode | ⬜ | |
+| M3 | Kernel threads, context switch (FXSAVE), guard-paged stacks | ✅ | `threads`: 300 spawn/join, exact frame+heap baseline |
+| M3 | Preemptive round-robin, sleep/yield, deferred reaping | ✅ | spinner shares 837k:886k; switch ≈4.2 k cycles |
+| M3 | Processes: private address spaces, ELF user loading, ring 3 | ✅ | `user-isolation`, `boot-default` (init pid 1) |
+| M3 | SYSCALL/SYSRET, validated user pointers (SMAP-aware) | ✅ | 2 fuzz processes, ≈18.4 k hostile syscalls each, survived |
+| M3 | Fault isolation (process killed, kernel continues) | ✅ | 6 fault classes |
+| M3 | Process churn without leaks | ✅ | 120 processes, frames/heap exact |
+| M3 | Multi-threaded processes, spawn/exec from user space, signals | ⬜ | |
+| M3 | Per-CPU queues, affinity, priorities, real-time budgets | ⬜ | needs SMP |
 | M4 | IPC, capabilities, userspace services | ⬜ | |
 | M5 | Storage, input, networking drivers | ⬜ | |
 | M6 | Compositor, desktop, CocoKit | ⬜ | only a boot splash exists |

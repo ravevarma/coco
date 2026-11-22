@@ -5,8 +5,17 @@
 * **Single CPU.** Application processors stay parked by the firmware.
 * **Periodic 100 Hz tick**, not tickless: idle costs ~1.3% host CPU in QEMU
   (0.3% when halted with interrupts off in M1).
-* **No processes, user mode, syscalls or IPC** (M3–M4). No device
-  interrupts: the I/O APIC is not programmed yet.
+* **Processes are single-threaded**, can only be started by the kernel (no
+  spawn/exec syscalls), and only the one `init.elf` image exists (no
+  filesystem). No IPC or capabilities yet (M4). No device interrupts: the
+  I/O APIC is not programmed yet.
+* **Scheduling is single-queue round-robin** with no priorities, budgets or
+  CPU accounting; a CPU-bound process gets its fair share but is never
+  limited.
+* **~1 MiB of RAM** is spent pre-populating all 256 kernel PML4 slots so
+  process address spaces share kernel mappings.
+* **AVX and FSGSBASE are disabled** for user programs (only x87/SSE state
+  is saved per thread).
 * **Heap memory is never returned** to the frame allocator, and small-class
   pages are never reused for other classes (bounded by peak use).
 * **x2APIC and HPET-fallback code paths are unverified** (QEMU 8.2 TCG lacks
