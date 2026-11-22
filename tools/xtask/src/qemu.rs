@@ -204,6 +204,18 @@ fn cases() -> Vec<Case> {
             &["selftest soak: PASS", "frames/heap at baseline"],
             &["FATAL", "PANIC", "FAIL", "not back to baseline"],
         ),
+        case(
+            "ipc-capabilities",
+            "test=ipc qemu-exit",
+            EXIT_SUCCESS,
+            &[
+                "selftest ipc: PASS",
+                "init: ipc echo: 1000 round trips verified",
+                "init: capability tests: 21 checks passed",
+                "live channels 0",
+            ],
+            NO_ERRORS,
+        ),
         case("timer", "test=timer qemu-exit", EXIT_SUCCESS, &["selftest timer: PASS", "100 ticks took"], NO_ERRORS),
         Case {
             memory: "512M",

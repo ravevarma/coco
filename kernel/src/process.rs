@@ -12,6 +12,9 @@ use coco_abi::layout::{PAGE_SIZE, USER_BASE, USER_STACK_SIZE, USER_STACK_TOP, US
 use coco_elf::{Executable, Policy};
 use coco_memory::paging::PageFlags;
 
+use coco_capability::HandleTable;
+
+use crate::ipc::KObject;
 use crate::sched::{self, Tid};
 use crate::sync::IrqSpinLock;
 use crate::{cpu, kprintln_emergency, mm};
@@ -39,6 +42,7 @@ struct Process {
     mode: u64,
     arg: u64,
     status: Status,
+    handles: HandleTable<KObject>,
 }
 
 /// Process-creation errors.
@@ -65,6 +69,29 @@ fn mem<T>(f: impl FnOnce(&mut mm::KernelMemory) -> Option<T>) -> Result<T, Spawn
 /// # Errors
 /// See [`SpawnError`]. On error every frame allocated so far is released.
 pub fn spawn(image: &[u8], mode: u64, arg: u64) -> Result<Pid, SpawnError> {
+    spawn_with_handles(image, mode, arg, alloc::vec::Vec::new())
+}
+
+/// Like [`spawn`], but first installs `initial` capabilities in the new
+/// process's handle table. If any are given, the first handle's value is
+/// passed as the entry argument instead of `arg`.
+///
+/// # Errors
+/// See [`SpawnError`].
+pub fn spawn_with_handles(
+    image: &[u8],
+    mode: u64,
+    arg: u64,
+    initial: alloc::vec::Vec<(KObject, u64)>,
+) -> Result<Pid, SpawnError> {
+    let mut handles = HandleTable::new(coco_abi::syscall::MAX_HANDLES);
+    let mut arg = arg;
+    for (i, (object, rights)) in initial.into_iter().enumerate() {
+        let value = handles.insert(object, rights).map_err(|_| SpawnError::OutOfMemory)?;
+        if i == 0 {
+            arg = value;
+        }
+    }
     let policy = Policy { window_start: USER_BASE, window_end: USER_TOP, max_total_bytes: MAX_USER_IMAGE };
     let exe = Executable::parse(image, &policy).map_err(SpawnError::BadImage)?;
     let root = mem(mm::KernelMemory::new_address_space)?;
@@ -88,7 +115,10 @@ pub fn spawn(image: &[u8], mode: u64, arg: u64) -> Result<Pid, SpawnError> {
         // Pids are never reused; this guards the invariant.
         let fresh = !procs.contains_key(&pid);
         if fresh {
-            procs.insert(pid, Process { root, thread: tid, entry: exe.entry(), mode, arg, status: Status::Running });
+            procs.insert(
+                pid,
+                Process { root, thread: tid, entry: exe.entry(), mode, arg, status: Status::Running, handles },
+            );
         }
         fresh
     };
@@ -186,12 +216,26 @@ extern "C" fn user_thread_main(pid: u64) -> ! {
 
 fn finish_current(status: Status) -> ! {
     coco_arch::cpu::disable_interrupts();
+    let mut released = alloc::vec::Vec::new();
     if let Some(pid) = sched::current_process()
         && let Some(p) = PROCESSES.lock().get_mut(&pid)
     {
         p.status = status;
+        // Close every capability as soon as the process ends, so peers
+        // observe PeerClosed immediately (not only when someone waits).
+        released = p.handles.drain();
     }
+    // Dropped outside PROCESSES (closing may wake peers and free memory).
+    drop(released);
     sched::exit_current()
+}
+
+/// Runs `f` on the current process's handle table (`None` if the current
+/// thread belongs to no process).
+pub fn with_handles<R>(f: impl FnOnce(&mut HandleTable<KObject>) -> R) -> Option<R> {
+    let pid = sched::current_process()?;
+    let mut procs = PROCESSES.lock();
+    procs.get_mut(&pid).map(|p| f(&mut p.handles))
 }
 
 /// `exit` system call.
@@ -246,6 +290,9 @@ pub fn wait(pid: Pid) -> Option<Status> {
 /// Whether `[ptr, ptr + len)` is mapped user-accessible in the current
 /// process (and `writable` if requested).
 pub fn user_range_mapped(ptr: u64, len: u64, writable: bool) -> bool {
+    if len == 0 {
+        return true; // an empty range touches no page
+    }
     let root = coco_arch::cpu::read_cr3() & 0x000F_FFFF_FFFF_F000;
     let mut page = ptr & !(PAGE_SIZE - 1);
     let end = ptr.saturating_add(len);

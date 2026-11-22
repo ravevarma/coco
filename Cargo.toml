@@ -6,7 +6,9 @@ members = [
     "kernel",
     "crates/coco-abi",
     "crates/coco-acpi",
+    "crates/coco-capability",
     "crates/coco-elf",
+    "crates/coco-ipc",
     "crates/coco-memory",
     "crates/coco-sync",
     "tools/xtask",
@@ -18,7 +20,9 @@ default-members = [
     "arch/x86_64",
     "crates/coco-abi",
     "crates/coco-acpi",
+    "crates/coco-capability",
     "crates/coco-elf",
+    "crates/coco-ipc",
     "crates/coco-memory",
     "crates/coco-sync",
     "tools/xtask",
@@ -35,7 +39,9 @@ publish = false
 [workspace.dependencies]
 coco-abi = { path = "crates/coco-abi" }
 coco-acpi = { path = "crates/coco-acpi" }
+coco-capability = { path = "crates/coco-capability" }
 coco-elf = { path = "crates/coco-elf" }
+coco-ipc = { path = "crates/coco-ipc" }
 coco-memory = { path = "crates/coco-memory" }
 coco-sync = { path = "crates/coco-sync" }
 coco-arch-x86_64 = { path = "arch/x86_64" }

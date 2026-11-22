@@ -15,6 +15,7 @@ mod fb;
 mod font;
 mod heap;
 mod interrupts;
+mod ipc;
 mod mm;
 mod power;
 mod process;
@@ -269,6 +270,7 @@ fn kernel_main(boot_info: u64) -> ! {
         }
         Some("shutdown") => record("shutdown", power::shutdown(acpi)),
         Some("threads") => record("threads", selftest::threads_suite()),
+        Some("ipc") => record("ipc", selftest::ipc_suite(init_image)),
         Some("soak") => {
             let secs = cmd.get("secs").and_then(|s| s.parse::<u64>().ok()).unwrap_or(60).clamp(1, 86_400);
             record("soak", selftest::soak(init_image, secs));

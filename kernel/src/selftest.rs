@@ -730,3 +730,94 @@ pub fn soak(image: &[u8], seconds: u64) -> TestResult {
     );
     ensure(WORK.load(Ordering::Relaxed) == rounds * 4 * (511 * 512 / 2), "kernel thread work lost")
 }
+
+/// IPC and capabilities: an echo service and client in separate processes,
+/// user-mode capability checks, cleanup when a process holding an endpoint
+/// is killed, refusal of reference cycles, syscall fuzzing including IPC
+/// calls, and exact accounting afterwards.
+///
+/// The whole scenario runs twice; the first round warms caches that are
+/// kept by design (heap pages, the graveyard worklist's capacity) and the
+/// second round must leave channels, heap use and frames exactly as the
+/// first left them. Frames held by heap growth are counted separately.
+pub fn ipc_suite(image: &[u8]) -> TestResult {
+    use crate::{ipc, sched};
+    ensure(!image.is_empty(), "no init.elf loaded")?;
+    ipc_round(image)?;
+    sched::reap();
+    let frames0 = free_frames();
+    let heap0 = heap::stats().unwrap_or_default();
+    ipc_round(image)?;
+    sched::reap();
+    let channels = ipc::live_channels();
+    let frames = free_frames();
+    let heap1 = heap::stats().unwrap_or_default();
+    let heap_growth_frames = (heap1.mapped.saturating_sub(heap0.mapped) / 4096) as u64;
+    kprintln!(
+        "  ipc: 2 rounds (echo pair, 21 capability checks, kill-cleanup, cycle refused + chain released, 2 IPC fuzzers); live channels {}, frames {} -> {} (heap grew {} frames), heap in use {} -> {} B",
+        channels,
+        frames0,
+        frames,
+        heap_growth_frames,
+        heap0.in_use,
+        heap1.in_use
+    );
+    ensure(channels == 0, "channels leaked")?;
+    ensure(frames + heap_growth_frames == frames0, "frames leaked")?;
+    ensure(heap1.in_use == heap0.in_use, "heap leaked")
+}
+
+fn ipc_round(image: &[u8]) -> TestResult {
+    use crate::ipc;
+    use crate::process::{self, Status};
+    use coco_abi::syscall::{init_mode as m, rights};
+    let rw = rights::READ | rights::WRITE;
+    let echo_pair = || -> Result<(Status, Status), &'static str> {
+        let (a, b) = ipc::create_pair().map_err(|_| "channel create failed")?;
+        let service =
+            process::spawn_with_handles(image, m::ECHO_SERVICE, 0, alloc::vec![(b, rw)]).map_err(|_| "spawn failed")?;
+        let client =
+            process::spawn_with_handles(image, m::ECHO_CLIENT, 0, alloc::vec![(a, rw)]).map_err(|_| "spawn failed")?;
+        let c = process::wait(client).ok_or("wait failed")?;
+        let s = process::wait(service).ok_or("wait failed")?;
+        Ok((c, s))
+    };
+    let echo = echo_pair()?;
+    if echo != (Status::Exited(0), Status::Exited(0)) {
+        kprintln!("  ipc: echo (client, service) = {:?}", echo);
+        return Err("echo service/client failed");
+    }
+    match process::wait(process::spawn(image, m::CAP_TESTS, 0).map_err(|_| "spawn failed")?) {
+        Some(Status::Exited(0)) => {}
+        other => {
+            kprintln!("  ipc: capability tests ended with {:?}", other);
+            return Err("user-mode capability tests failed");
+        }
+    }
+    // A client killed while holding its endpoint: the service must observe
+    // PeerClosed and exit(0) instead of hanging.
+    let (a, b) = ipc::create_pair().map_err(|_| "channel create failed")?;
+    let service = process::spawn_with_handles(image, m::ECHO_SERVICE, 0, alloc::vec![(b, rw)]).map_err(|_| "spawn")?;
+    let victim = process::spawn_with_handles(image, m::FAULT_NULL, 0, alloc::vec![(a, rw)]).map_err(|_| "spawn")?;
+    ensure(matches!(process::wait(victim), Some(Status::Killed(_))), "victim not killed")?;
+    ensure(process::wait(service) == Some(Status::Exited(0)), "service did not see PeerClosed after kill")?;
+    // Reference cycles are refused; a chain of endpoints queued in other
+    // channels is released through the graveyard when the outer ends drop.
+    {
+        let (x0, x1) = ipc::create_pair().map_err(|_| "channel create failed")?;
+        let (y0, y1) = ipc::create_pair().map_err(|_| "channel create failed")?;
+        let (z0, z1) = ipc::create_pair().map_err(|_| "channel create failed")?;
+        ensure(ipc::kernel_send(&x0, b"y1", alloc::vec![(y1, rw)]).is_ok(), "kernel send failed")?;
+        ensure(ipc::kernel_send(&y0, b"z1", alloc::vec![(z1, rw)]).is_ok(), "kernel send failed")?;
+        ensure(
+            ipc::kernel_send(&z0, b"x1", alloc::vec![(x1, rw)]) == Err(coco_abi::syscall::Error::InvalidArgument),
+            "reference cycle was not refused",
+        )?;
+        drop((x0, y0, z0));
+    }
+    for seed in [0xA11CE_u64, 0xB0B] {
+        let pid = process::spawn(image, m::SYSCALL_FUZZ, seed).map_err(|_| "spawn")?;
+        ensure(process::wait(pid) == Some(Status::Exited(0)), "fuzz process failed")?;
+    }
+    Ok(())
+}

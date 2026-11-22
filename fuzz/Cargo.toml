@@ -12,6 +12,8 @@ libfuzzer-sys = "0.4"
 coco-elf = { path = "../crates/coco-elf" }
 coco-abi = { path = "../crates/coco-abi" }
 coco-acpi = { path = "../crates/coco-acpi" }
+coco-capability = { path = "../crates/coco-capability" }
+coco-ipc = { path = "../crates/coco-ipc" }
 
 [[bin]]
 name = "elf_parse"
@@ -37,6 +39,20 @@ bench = false
 [[bin]]
 name = "acpi_tables"
 path = "fuzz_targets/acpi_tables.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "capabilities"
+path = "fuzz_targets/capabilities.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ipc_channel"
+path = "fuzz_targets/ipc_channel.rs"
 test = false
 doc = false
 bench = false

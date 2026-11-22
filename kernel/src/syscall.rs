@@ -13,7 +13,7 @@ use coco_abi::layout::{PAGE_SIZE, USER_TOP};
 use coco_abi::syscall::{self as abi, Error, validate_user_range};
 use coco_arch::cpu as arch;
 
-use crate::{console, interrupts, process, sched};
+use crate::{console, interrupts, ipc, process, sched};
 
 /// Registers saved by the entry stub (lowest address first).
 #[derive(Debug)]
@@ -85,9 +85,59 @@ fn smap_enabled() -> bool {
     arch::read_cr4() & arch::CR4_SMAP != 0
 }
 
+/// Checks that `[ptr, ptr + len)` is user space mapped user-writable in
+/// the current process.
+///
+/// # Errors
+/// [`Error::BadAddress`].
+pub fn check_user_writable(ptr: u64, len: u64) -> Result<(), Error> {
+    validate_user_range(ptr, len)?;
+    if !process::user_range_mapped(ptr, len, true) {
+        return Err(Error::BadAddress);
+    }
+    Ok(())
+}
+
+/// Copies `src` to user address `dst` after the same checks as
+/// [`check_user_writable`].
+///
+/// # Errors
+/// [`Error::BadAddress`].
+pub fn copy_to_user(dst: u64, src: &[u8]) -> Result<(), Error> {
+    let len = src.len() as u64;
+    check_user_writable(dst, len)?;
+    let smap = smap_enabled();
+    // SAFETY: the destination was validated as user-writable mapped memory
+    // of the current single-threaded process; `src` is a kernel buffer.
+    // The SMAP window is opened only around the copy, and only when SMAP
+    // (and therefore STAC) is supported.
+    unsafe {
+        core::arch::asm!(
+            "test {smap}, {smap}",
+            "jz 2f",
+            "stac",
+            "2:",
+            "rep movsb",
+            "test {smap}, {smap}",
+            "jz 3f",
+            "clac",
+            "3:",
+            smap = in(reg) u64::from(smap),
+            inout("rsi") src.as_ptr() => _,
+            inout("rdi") dst => _,
+            inout("rcx") len => _,
+            options(nostack),
+        );
+    }
+    Ok(())
+}
+
 /// Copies `dst.len()` bytes from user address `src` after validating that
 /// the whole range is inside user space and mapped user-accessible.
-fn copy_from_user(dst: &mut [u8], src: u64) -> Result<(), Error> {
+///
+/// # Errors
+/// [`Error::BadAddress`].
+pub fn copy_from_user(dst: &mut [u8], src: u64) -> Result<(), Error> {
     let len = dst.len() as u64;
     validate_user_range(src, len)?;
     if !process::user_range_mapped(src, len, false) {
@@ -159,6 +209,13 @@ fn dispatch(f: &SyscallFrame) -> Result<u64, Error> {
             }
             Ok(0)
         }
+        abi::CHANNEL_CREATE => ipc::sys_channel_create(f.rdi),
+        abi::CHANNEL_SEND => ipc::sys_channel_send(f.rdi, f.rsi, f.rdx, f.r10, f.r8),
+        abi::CHANNEL_RECV => ipc::sys_channel_recv(f.rdi, f.rsi, f.rdx, f.r10, f.r8),
+        abi::HANDLE_CLOSE => ipc::sys_handle_close(f.rdi),
+        abi::HANDLE_DUPLICATE => ipc::sys_handle_duplicate(f.rdi, f.rsi),
+        abi::WAIT_READABLE => ipc::sys_wait_readable(f.rdi, f.rsi),
+        abi::HANDLE_RIGHTS => ipc::sys_handle_rights(f.rdi),
         _ => Err(Error::NoSuchCall),
     }
 }

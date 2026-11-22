@@ -445,6 +445,25 @@ pub fn sleep(ticks: u64) {
     }
 }
 
+/// Blocks the current thread until `deadline` (a tick count; `u64::MAX`
+/// = until woken) or until [`wake`] is called for it. Must be called with
+/// interrupts disabled; callers re-check their condition afterwards.
+pub fn block_until(deadline: u64) {
+    switch_away(State::Sleeping(deadline));
+}
+
+/// Makes a sleeping/blocked thread runnable (no effect otherwise).
+pub fn wake(tid: Tid) {
+    let mut g = SCHED.lock();
+    let Some(s) = g.as_mut() else { return };
+    if let Some(t) = s.threads.get_mut(&tid)
+        && matches!(t.state, State::Sleeping(_))
+    {
+        t.state = State::Ready;
+        s.ready.push_back(tid); // capacity reserved: no allocation
+    }
+}
+
 /// Terminates the current thread.
 pub fn exit_current() -> ! {
     arch::disable_interrupts();
