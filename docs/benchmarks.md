@@ -8,12 +8,12 @@ Since M2 the TSC is calibrated against the ACPI PM timer (measured
 
 ## Binary and image size
 
-| Artifact | M1 (`0c9c263`) | M2 (`b60418a`) | M3 (`c89325a`) |
-|---|---:|---:|---:|
-| `BOOTX64.EFI` (loader) | 31,232 | 31,232 | 32,256 |
-| `kernel.elf` | 41,664 | 90,992 | 132,160 |
-| `init.elf` (first user program) | — | — | 12,648 |
-| Installed base (cluster-rounded) | 75,264 | 124,416 | **179,712** of 108,000,000 |
+| Artifact | M1 (`0c9c263`) | M2 (`b60418a`) | M3 (`c89325a`) | M4 (`99e8620`) |
+|---|---:|---:|---:|---:|
+| `BOOTX64.EFI` (loader) | 31,232 | 31,232 | 32,256 | 32,256 |
+| `kernel.elf` | 41,664 | 90,992 | 132,160 | 160,872 |
+| `init.elf` (first user program) | — | — | 12,648 | 16,760 |
+| Installed base (cluster-rounded) | 75,264 | 124,416 | 179,712 | **212,480** of 108,000,000 |
 | Kernel image in memory (text + rodata + data/bss) | 88 KiB | 156 KiB | 196 KiB |
 
 The M2 growth comes from the heap and `alloc` collections, ACPI parsing,
@@ -87,6 +87,13 @@ interrupts. Calibrated rates: TSC 2,102–2,108 MHz, APIC timer
 | Process churn | 120 processes (100 sequential, 20 concurrent): frames 63,403 → 63,403, heap 27,648 → 27,648 B |
 | Hostile syscalls | 2 fuzz processes, 20,000 draws each (draws of `exit` skipped): 6,312 + 12,123 and 6,150 + 12,342 (succeeded + rejected with a valid error code); both processes exited 0 |
 | Kernel-half pre-population | 252 level-3 tables (≈1 MiB) |
+
+## IPC (M4, revision `99e8620`, TCG)
+
+| Measurement | Value |
+|---|---:|
+| Echo round trip (client send → service recv/upper-case/send → client recv, both blocking) | 86,741 and 104,281 cycles (two rounds; ≈41–50 µs) |
+| Context switch, re-measured (3 runs, quiet host) | 4,172–4,422 cycles (6,278 observed once inside the busy full-matrix run) |
 
 ## Idle CPU (host CPU used by QEMU over 10 s after boot)
 

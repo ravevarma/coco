@@ -7,8 +7,16 @@
   (0.3% when halted with interrupts off in M1).
 * **Processes are single-threaded**, can only be started by the kernel (no
   spawn/exec syscalls), and only the one `init.elf` image exists (no
-  filesystem). No IPC or capabilities yet (M4). No device interrupts: the
-  I/O APIC is not programmed yet.
+  filesystem). No device interrupts: the I/O APIC is not programmed yet.
+* **IPC is channels only**: no shared-memory objects, no service registry
+  (services get their endpoints from the kernel at spawn), no per-process
+  quotas on channels (one global limit of 4,096). Round trips are slow
+  under TCG (≈87–104 k cycles) with no fast path.
+* **Sends that would create a reference cycle are refused**, which some
+  designs may find restrictive (e.g. two services exchanging each other's
+  endpoints through their own channels).
+* **The heap keeps pages it grows into**; lifecycle tests therefore treat
+  `free + heap-held` frames as the leak invariant.
 * **Scheduling is single-queue round-robin** with no priorities, budgets or
   CPU accounting; a CPU-bound process gets its fair share but is never
   limited.

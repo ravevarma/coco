@@ -34,7 +34,11 @@ Legend: ✅ implemented and tested · 🟡 partial · ⬜ not started.
 | M3 | Process churn without leaks | ✅ | 120 processes, frames/heap exact |
 | M3 | Multi-threaded processes, spawn/exec from user space, signals | ⬜ | |
 | M3 | Per-CPU queues, affinity, priorities, real-time budgets | ⬜ | needs SMP |
-| M4 | IPC, capabilities, userspace services | ⬜ | |
+| M4 | Capability handle tables (rights, generations, attenuation, limits) | ✅ | host model test, Miri, 11.8 M fuzz runs, 21 user-mode checks |
+| M4 | Channels: bounded messages, handle transfer, peer-closed, blocking wait | ✅ | echo service/client, kill cleanup |
+| M4 | Reference-cycle refusal; iterative release of chains | ✅ | `ipc-capabilities` (0 live channels after 2 rounds) |
+| M4 | First user-space service (echo) | ✅ | 1,000 verified round trips |
+| M4 | Name/service registry, shared memory objects, process spawning from user space | ⬜ | next |
 | M5 | Storage, input, networking drivers | ⬜ | |
 | M6 | Compositor, desktop, CocoKit | ⬜ | only a boot splash exists |
 | M7 | Files, Settings, Search, app runtime | ⬜ | |

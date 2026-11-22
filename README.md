@@ -6,13 +6,14 @@ coco is an independent operating system for x86_64 UEFI machines, written
 from scratch in Rust: its own UEFI loader, its own kernel, its own boot
 protocol — no Linux, BSD, XNU, Windows or Redox underneath.
 
-> **Status: M0–M3 complete — EXPERIMENTAL, NOT RELEASE READY.**
+> **Status: M0–M4 complete — EXPERIMENTAL, NOT RELEASE READY.**
 > coco boots in QEMU/OVMF and runs its first user program as pid 1. It has
 > exception handling, a frame allocator, page tables and a hardened heap,
 > ACPI discovery, a calibrated APIC timer, a preemptive scheduler, isolated
-> user processes with system calls, and ACPI reboot/power-off. It has no
-> IPC, filesystem, drivers or applications yet and has never run on
-> physical hardware.
+> user processes with system calls, capability-based handles, channel IPC
+> with a first user-space service, and ACPI reboot/power-off. It has no
+> filesystem, drivers or applications yet and has never run on physical
+> hardware.
 > See [docs/quality-report.md](docs/quality-report.md).
 
 ![coco boot screen in QEMU](docs/images/boot-splash.png)
@@ -27,12 +28,14 @@ protocol — no Linux, BSD, XNU, Windows or Redox underneath.
 | ACPI parser | `crates/coco-acpi/` | RSDP/XSDT/MADT/FADT/HPET/`_S5`, no allocation, no `unsafe`, fuzzed |
 | Boot protocol | `crates/coco-abi/` | versioned `BootInfo`, memory map normalisation, cmdline parsing |
 | ELF parser | `crates/coco-elf/` | strict, allocation-free, fuzzed |
+| Capabilities | `crates/coco-capability/` | handle tables: rights, generations, attenuation |
+| IPC | `crates/coco-ipc/` | channel state machine: bounded queues, handle transfer, peer-closed |
 | Memory | `crates/coco-memory/` | bitmap frame allocator, 4-level page-table mapper, hardened heap |
 | Sync | `crates/coco-sync/` | spin lock, Loom-checked |
 | Arch | `arch/x86_64/` | privileged instructions, descriptors, 16550 UART |
 | Tooling | `tools/xtask/` | build, GPT/FAT image, size gate, QEMU test matrix, reproducibility check |
 
-Base image today: **179,712 bytes** of the 108,000,000-byte budget
+Base image today: **212,480 bytes** of the 108,000,000-byte budget
 (see [docs/size-report.md](docs/size-report.md)).
 
 ## Quick start

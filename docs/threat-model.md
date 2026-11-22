@@ -42,9 +42,13 @@ future user data, and availability of the boot path.
 | Kernel data leaking to user space | registers zeroed on entry, restored on syscall return, x87/SSE state saved per thread, AVX disabled, fresh frames zeroed | code review (`docs/adr/0013`) |
 | SYSRET non-canonical RCX attack | RCX validated before `sysret` | code review |
 | User code disabling SMAP for the kernel (RFLAGS.AC) | FMASK clears AC on syscall entry | code review |
+| Using a capability without the right | rights checked on every call; duplicate only attenuates | 21 user-mode checks |
+| Forged or stale handle values | generation-checked values; zero invalid | host model test, fuzzing, user checks |
+| Kernel-memory exhaustion through IPC | bounded messages/queues/handles, 4,096-channel limit, cycle refusal (no leaks) | `ipc-capabilities`, fuzzing |
+| Peer hangs after a crash | handles closed on exit/kill → `PeerClosed` | kill-cleanup test |
 
 ## Not yet addressed (by design of the milestone order)
 Speculative-execution attacks (Meltdown: no KPTI; Spectre: no
-mitigations), capabilities and least-privilege permissions (M4), IOMMU/DMA isolation,
+mitigations), per-process resource quotas, IOMMU/DMA isolation,
 KASLR, stack canaries, secure randomness, resource quotas per process,
 signed updates and rollback protection. None of these are claimed.

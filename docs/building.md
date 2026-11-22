@@ -28,6 +28,8 @@
   timer accuracy and #BP self-tests.
 * `test=heap` — heap churn plus exhaustion/recovery (consumes free frames).
 * `test=threads` — kernel-thread fairness, context-switch cost, 300-thread churn.
+* `test=ipc` — echo service/client, 21 user-mode capability checks, kill
+  cleanup, cycle refusal, IPC fuzzing; two rounds with exact accounting.
 * `test=soak secs=N` — N seconds of process/thread/heap churn; frames and
   heap must be exactly at baseline after every round.
 * `test=user` — user processes: preemption across processes, 6 fault

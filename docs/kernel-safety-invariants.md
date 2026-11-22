@@ -7,17 +7,17 @@ deny`). `unsafe_op_in_unsafe_fn` is denied, so unsafe functions also need
 explicit blocks. This document lists the invariants those justifications
 rely on.
 
-## Inventory (M3, revision c89325a)
+## Inventory (M4, revision 99e8620)
 
 | Crate | `unsafe {}` blocks | `unsafe fn` | `unsafe impl` | Purpose |
 |---|---:|---:|---:|---|
 | `coco-arch-x86_64` | 31 | 17 | 0 | privileged instructions, port I/O, UART, CR4, interrupt flag, FXSAVE |
 | `coco-boot` | 46 | 1 | 1 | UEFI FFI, page-table construction, handoff, init image copy |
-| `coco-kernel` | 116 | 1 | 6 | descriptor tables, APIC/HPET/PM-timer/CMOS/PIC I/O, framebuffer, boot-info read, allocator glue, context switch, ring-3 entry, syscall entry and user copies, self-tests |
-| `coco-init` (user) | 5 | 0 | 0 | `syscall` instruction, deliberate faults for isolation tests |
+| `coco-kernel` | 119 | 1 | 6 | descriptor tables, APIC/HPET/PM-timer/CMOS/PIC I/O, framebuffer, boot-info read, allocator glue, context switch, ring-3 entry, syscall entry and user copies, self-tests |
+| `coco-init` (user) | 6 | 0 | 0 | `syscall`/`rdtsc` instructions, deliberate faults for isolation tests |
 | `coco-memory` | 21 | 4 | 1 (+1 unsafe trait) | page-table entries, frame tokens, heap free lists |
 | `coco-sync` | 4 | 0 | 2 | lock guard dereference |
-| `coco-abi`, `coco-acpi`, `coco-elf` | **0** | 0 | 0 | untrusted-input parsers are 100% safe Rust |
+| `coco-abi`, `coco-acpi`, `coco-capability`, `coco-elf`, `coco-ipc` | **0** | 0 | 0 | parsers, capability tables and channel state are 100% safe Rust |
 
 ## Memory
 
@@ -88,8 +88,9 @@ rely on.
   `try_lock` and fall back to the lock-free UART path
   (`SerialPort::assume_init`). Verified by the `fault-with-console-locked`
   QEMU test.
-* **L3 — Lock order.** `SCHED` → `HEAP` → `MEMORY` → `CONSOLE`; `PROCESSES`
-  is never held together with another lock. The heap grows by taking
+* **L3 — Lock order.** `PROCESSES` → `CHANNEL`; `GRAPH` → `CHANNEL`;
+  `CHANNEL` → `GRAVEYARD` → `SCHED` → `HEAP` → `MEMORY` → `CONSOLE`.
+  `PROCESSES` and `GRAPH` are never held together. The heap grows by taking
   `MEMORY`; code holding `MEMORY` never allocates (address-space teardown
   frees frames from callbacks for this reason); the timer path takes only
   `SCHED` and never allocates.
@@ -119,6 +120,19 @@ rely on.
   during the copy.
 * **U2 — Return to user.** Every caller-saved register is restored from the
   syscall frame; RCX must be below `USER_TOP` or the process is killed.
+* **I1 — Capabilities.** Kernel objects are reached from user space only
+  through the caller's handle table; every syscall checks the generation
+  and the rights it needs. Rights never grow (duplicate = subset).
+* **I2 — Channel references.** Each side's open count equals the number of
+  `ChannelRef`s to it (in tables, in flight, or held by the kernel).
+  Messages drained from a closed side are dropped outside channel locks,
+  through the graveyard worklist.
+* **I3 — Acyclic in-flight graph.** A send carrying endpoints is checked and
+  enqueued under `GRAPH`; it is refused if the endpoint's channel already
+  reaches the destination channel. Hence no channel can keep itself alive.
+* **I4 — Process exit.** A finished or killed process's handle table is
+  drained before its thread switches away; objects are dropped outside
+  `PROCESSES`.
 * **U3 — Fault containment.** Exceptions with CPL 3 in the saved CS kill the
   current process; exceptions at CPL 0 remain fatal kernel errors.
 * **L4 — Ordering.** `SpinLock` acquires with `Acquire` and releases with
