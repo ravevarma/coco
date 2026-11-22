@@ -377,3 +377,194 @@ fn canonical_addresses() {
     assert!(is_canonical(0xFFFF_8000_0000_0000));
     assert!(is_canonical(u64::MAX));
 }
+
+// ---------------------------------------------------------------- heap
+
+use crate::heap::*;
+
+/// Arena backend: grows within a pre-allocated buffer, with an optional
+/// byte budget to exercise OOM.
+struct ArenaBackend {
+    budget: usize,
+    grown: usize,
+    calls: u32,
+}
+
+impl HeapBackend for ArenaBackend {
+    fn grow(&mut self, _start: *mut u8, len: usize) -> bool {
+        self.calls += 1;
+        if self.grown + len > self.budget {
+            return false;
+        }
+        self.grown += len;
+        true
+    }
+}
+
+/// Page-aligned arena that outlives the heap built on it.
+struct Arena {
+    _buf: Vec<u8>,
+    base: *mut u8,
+    len: usize,
+}
+
+impl Arena {
+    fn new(len: usize) -> Self {
+        let mut buf = std::vec![0u8; len + HEAP_PAGE];
+        let raw = buf.as_mut_ptr();
+        let pad = raw.align_offset(HEAP_PAGE);
+        Self { _buf: buf, base: raw.wrapping_add(pad), len }
+    }
+}
+
+fn heap(arena: &Arena, budget: usize, poison: bool) -> Heap<ArenaBackend> {
+    // SAFETY: the arena is reserved for this heap and outlives it; the
+    // backend only accounts, the memory is always valid.
+    unsafe { Heap::new(arena.base, arena.len, HeapConfig { poison }, ArenaBackend { budget, grown: 0, calls: 0 }) }
+}
+
+#[test]
+fn heap_class_math() {
+    assert_eq!(class_of(1, 1), Some(0));
+    assert_eq!(class_of(16, 8), Some(0));
+    assert_eq!(class_of(17, 8), Some(1));
+    assert_eq!(class_of(8, 64), Some(2));
+    assert_eq!(class_of(2048, 1), Some(7));
+    assert_eq!(class_of(2049, 1), None);
+    assert_eq!(class_of(1, 4096), None);
+}
+
+#[test]
+fn heap_small_and_large_roundtrip() {
+    let arena = Arena::new(1 << 20);
+    let mut h = heap(&arena, usize::MAX, true);
+    let a = h.allocate(24, 8).unwrap();
+    let b = h.allocate(24, 8).unwrap();
+    assert_ne!(a, b);
+    assert_eq!(a as usize % 32, 0);
+    let big = h.allocate(10_000, 4096).unwrap();
+    assert_eq!(big as usize % 4096, 0);
+    assert_eq!(h.stats().in_use, 32 + 32 + 3 * 4096);
+    h.free(a, 24, 8).unwrap();
+    h.free(big, 10_000, 4096).unwrap();
+    h.free(b, 24, 8).unwrap();
+    assert_eq!(h.stats().in_use, 0);
+    assert!(h.check_runs());
+    // Freed large run is reused first-fit.
+    assert_eq!(h.allocate(8192, 8).unwrap(), big);
+}
+
+#[test]
+fn heap_detects_double_free_and_bad_pointers() {
+    let arena = Arena::new(1 << 20);
+    let mut h = heap(&arena, usize::MAX, true);
+    let a = h.allocate(100, 8).unwrap();
+    h.free(a, 100, 8).unwrap();
+    assert_eq!(h.free(a, 100, 8), Err(HeapError::DoubleFree(a as usize)));
+    let big = h.allocate(5000, 8).unwrap();
+    h.free(big, 5000, 8).unwrap();
+    assert_eq!(h.free(big, 5000, 8), Err(HeapError::DoubleFree(big as usize)));
+    let c = h.allocate(100, 8).unwrap();
+    assert_eq!(h.free(c.wrapping_add(8), 100, 8), Err(HeapError::InvalidPointer(c as usize + 8)));
+    let outside = arena.base.wrapping_add(arena.len - 16);
+    assert!(matches!(h.free(outside, 16, 8), Err(HeapError::InvalidPointer(_))));
+    assert_eq!(h.allocate(0, 8), Err(HeapError::Unsupported));
+    assert_eq!(h.allocate(8, 8192), Err(HeapError::Unsupported));
+    assert_eq!(h.allocate(8, 3), Err(HeapError::Unsupported));
+    h.free(c, 100, 8).unwrap();
+    assert_eq!(h.stats().in_use, 0);
+}
+
+#[test]
+fn heap_detects_use_after_free_write() {
+    let arena = Arena::new(1 << 20);
+    let mut h = heap(&arena, usize::MAX, true);
+    let a = h.allocate(64, 8).unwrap();
+    h.free(a, 64, 8).unwrap();
+    // SAFETY: deliberately writes into the freed (but still owned by the
+    // arena) block to simulate a use-after-free bug.
+    unsafe { a.wrapping_add(40).write(0x41) };
+    assert_eq!(h.allocate(64, 8), Err(HeapError::Corruption(a as usize)));
+}
+
+#[test]
+fn heap_out_of_memory_and_recovery() {
+    let arena = Arena::new(1 << 20);
+    let mut h = heap(&arena, 256 * 1024, false);
+    let mut live = Vec::new();
+    loop {
+        match h.allocate(4096 * 3, 8) {
+            Ok(p) => live.push(p),
+            Err(e) => {
+                assert_eq!(e, HeapError::OutOfMemory);
+                break;
+            }
+        }
+    }
+    assert!(!live.is_empty() && h.stats().failures == 1);
+    for p in live.drain(..) {
+        h.free(p, 4096 * 3, 8).unwrap();
+    }
+    assert_eq!(h.stats().in_use, 0);
+    assert!(h.check_runs());
+    // Everything is reusable after recovery without growing further.
+    let calls = h.backend_mut().calls;
+    let p = h.allocate(4096 * 3, 8).unwrap();
+    assert_eq!(h.backend_mut().calls, calls);
+    h.free(p, 4096 * 3, 8).unwrap();
+}
+
+/// Model-based property test: random sizes/alignments, contents written
+/// and verified, no overlaps, exact accounting, full recovery.
+#[test]
+fn heap_random_ops_match_model() {
+    let arena = Arena::new(32 << 20);
+    let mut h = heap(&arena, usize::MAX, true);
+    let mut rng = Rng(0x4EA9);
+    let mut live: Vec<(*mut u8, usize, usize, u8)> = Vec::new();
+    let mut ranges: BTreeMap<usize, usize> = BTreeMap::new();
+    let steps = if cfg!(miri) { 400 } else { 40_000 };
+    for step in 0..steps {
+        // Bounded live set (<= 1000 blocks, <= ~20 MiB worst case) so this
+        // test checks correctness; exhaustion has its own test.
+        if live.is_empty() || (live.len() < 1000 && rng.below(2) == 0) {
+            let size = match rng.below(10) {
+                0..=6 => 1 + rng.below(200) as usize,
+                7 | 8 => 1 + rng.below(2048) as usize,
+                _ => 1 + rng.below(20_000) as usize,
+            };
+            let align = 1usize << rng.below(13);
+            let p = match h.allocate(size, align) {
+                Ok(p) => p,
+                Err(e) => {
+                    panic!("step {step}: {e:?} size {size} align {align} live {} stats {:?}", live.len(), h.stats())
+                }
+            };
+            assert_eq!(p as usize % align, 0, "step {step}: misaligned");
+            let start = p as usize;
+            if let Some((&s, &e)) = ranges.range(..start + size).next_back() {
+                assert!(e <= start || s >= start + size, "step {step}: overlap");
+            }
+            ranges.insert(start, start + size);
+            let tag = step as u8;
+            // SAFETY: freshly allocated block of `size` bytes.
+            unsafe { core::ptr::write_bytes(p, tag, size) };
+            live.push((p, size, align, tag));
+        } else {
+            let i = rng.below(live.len() as u64) as usize;
+            let (p, size, align, tag) = live.swap_remove(i);
+            // SAFETY: live block of `size` bytes owned by the test.
+            let bytes = unsafe { core::slice::from_raw_parts(p, size) };
+            assert!(bytes.iter().all(|&b| b == tag), "step {step}: contents corrupted");
+            ranges.remove(&(p as usize));
+            h.free(p, size, align).unwrap();
+        }
+    }
+    assert!(h.check_runs());
+    for (p, size, align, _) in live.drain(..) {
+        h.free(p, size, align).unwrap();
+    }
+    assert_eq!(h.stats().in_use, 0);
+    assert!(h.check_runs());
+    assert_eq!(h.stats().allocations, h.stats().frees);
+}

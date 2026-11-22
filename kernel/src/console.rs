@@ -7,8 +7,8 @@
 use core::fmt::{self, Write};
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use crate::sync::IrqSpinLock;
 use coco_arch::serial::{COM1, SerialPort};
-use coco_sync::SpinLock;
 
 use crate::fb::{FbConsole, Framebuffer};
 
@@ -17,7 +17,7 @@ struct Console {
     fb: Option<FbConsole>,
 }
 
-static CONSOLE: SpinLock<Console> = SpinLock::new(Console { serial: None, fb: None });
+static CONSOLE: IrqSpinLock<Console> = IrqSpinLock::new(Console { serial: None, fb: None });
 static SERIAL_PRESENT: AtomicBool = AtomicBool::new(false);
 
 impl Write for Console {

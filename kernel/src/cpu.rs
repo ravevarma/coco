@@ -6,7 +6,7 @@
 //! interrupted kernel stack is exhausted (e.g. hit its guard page).
 
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use coco_abi::layout::{BOOT_STACK_GUARD, PAGE_SIZE};
 use coco_arch::cpu;
@@ -33,12 +33,16 @@ struct CpuTables {
     idt: [Gate; 256],
 }
 
-/// Interrupt-stack-table stacks. Kept separate from [`CpuTables`] so they
-/// are all-zero and land in `.bss` (no file space).
-#[repr(C, align(16))]
+/// Interrupt-stack-table stacks, each preceded by a guard page that
+/// [`arm_ist_guards`] unmaps once the kernel controls paging. Kept separate
+/// from [`CpuTables`] so they are all-zero and land in `.bss`.
+#[repr(C, align(4096))]
 struct IstStacks {
+    guard_double_fault: [u8; PAGE_SIZE as usize],
     double_fault: [u8; IST_STACK_SIZE],
+    guard_nmi: [u8; PAGE_SIZE as usize],
     nmi: [u8; IST_STACK_SIZE],
+    guard_machine_check: [u8; PAGE_SIZE as usize],
     machine_check: [u8; IST_STACK_SIZE],
 }
 
@@ -51,6 +55,9 @@ struct StacksCell(UnsafeCell<IstStacks>);
 unsafe impl Sync for StacksCell {}
 
 static IST_STACKS: StacksCell = StacksCell(UnsafeCell::new(IstStacks {
+    guard_double_fault: [0; PAGE_SIZE as usize],
+    guard_nmi: [0; PAGE_SIZE as usize],
+    guard_machine_check: [0; PAGE_SIZE as usize],
     double_fault: [0; IST_STACK_SIZE],
     nmi: [0; IST_STACK_SIZE],
     machine_check: [0; IST_STACK_SIZE],
@@ -72,6 +79,18 @@ static CPU0: TablesCell =
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Number of #BP exceptions handled (observable by self-tests).
 pub static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
+/// Nesting depth of hardware-interrupt handlers (vectors >= 32).
+static IN_INTERRUPT: AtomicU32 = AtomicU32::new(0);
+
+/// True while a hardware-interrupt handler is running on this CPU.
+pub fn in_interrupt() -> bool {
+    IN_INTERRUPT.load(Ordering::Relaxed) > 0
+}
+
+/// First vector available for hardware interrupts.
+pub const FIRST_IRQ_VECTOR: u8 = 32;
+/// Bytes between consecutive IRQ entry stubs (`.p2align 4`).
+const IRQ_STUB_STRIDE: u64 = 16;
 
 /// Register state saved by the exception entry stubs (lowest address first).
 #[derive(Debug)]
@@ -193,6 +212,20 @@ TRAP_ERR 29
 TRAP_ERR 30
 TRAP_NOERR 31
 
+// Hardware-interrupt stubs for vectors 32..=255, 16 bytes apart:
+// push 0 (error code), push vector, jmp trap_common.
+    .p2align 4
+.global coco_irq_stubs
+coco_irq_stubs:
+.set irqvec, 32
+.rept 224
+    .p2align 4
+    push 0
+    push irqvec
+    jmp trap_common
+    .set irqvec, irqvec + 1
+.endr
+
 .section .rodata
 .p2align 3
 .global coco_trap_stubs
@@ -213,6 +246,49 @@ coco_trap_stubs:
 unsafe extern "C" {
     /// Addresses of the 32 exception entry stubs (defined above).
     static coco_trap_stubs: [u64; 32];
+    /// First of 224 hardware-interrupt stubs (defined above).
+    static coco_irq_stubs: [u8; 0];
+}
+
+/// Entry address of the IRQ stub for `vector` (>= 32).
+fn irq_stub(vector: u8) -> u64 {
+    let base = (&raw const coco_irq_stubs) as u64;
+    base + u64::from(vector - FIRST_IRQ_VECTOR) * IRQ_STUB_STRIDE
+}
+
+/// Virtual addresses of the three IST guard pages.
+pub fn ist_guard_pages() -> [u64; 3] {
+    let base = IST_STACKS.0.get() as u64;
+    [
+        base + core::mem::offset_of!(IstStacks, guard_double_fault) as u64,
+        base + core::mem::offset_of!(IstStacks, guard_nmi) as u64,
+        base + core::mem::offset_of!(IstStacks, guard_machine_check) as u64,
+    ]
+}
+
+/// Unmaps the IST guard pages so an IST stack overflow faults instead of
+/// silently corrupting the neighbouring stack. The backing frames stay part
+/// of the kernel image (never reused).
+pub fn arm_ist_guards(mem: &mut crate::mm::KernelMemory) -> bool {
+    let mut ok = true;
+    for page in ist_guard_pages() {
+        match mem.mapper.unmap(page) {
+            Ok((_phys, _size, flush)) => cpu::invlpg(flush.addr()),
+            Err(_) => ok = false,
+        }
+    }
+    ok
+}
+
+/// Security features enabled by [`init`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Hardening {
+    /// SMEP enabled.
+    pub smep: bool,
+    /// SMAP enabled.
+    pub smap: bool,
+    /// UMIP enabled.
+    pub umip: bool,
 }
 
 /// One past the highest address of the IST stack at `offset` in [`IstStacks`].
@@ -225,13 +301,16 @@ fn stack_top(offset: usize) -> u64 {
 pub enum CpuInitError {
     /// `init` was called twice.
     AlreadyInitialized,
+    #[allow(dead_code, reason = "payload is read through the Debug impl")]
+    /// The assembled IRQ stubs do not have the expected layout.
+    BadIrqStubs(u8),
 }
 
 /// Builds and loads the GDT, TSS and IDT for the boot CPU.
 ///
 /// # Errors
 /// [`CpuInitError::AlreadyInitialized`] on a second call.
-pub fn init() -> Result<(), CpuInitError> {
+pub fn init() -> Result<Hardening, CpuInitError> {
     if INITIALIZED.swap(true, Ordering::AcqRel) {
         return Err(CpuInitError::AlreadyInitialized);
     }
@@ -259,6 +338,19 @@ pub fn init() -> Result<(), CpuInitError> {
             _ => 0,
         };
         *gate = Gate::interrupt(handler, KERNEL_CS, ist, 0);
+    }
+    for vector in FIRST_IRQ_VECTOR..=255 {
+        let stub = irq_stub(vector);
+        // SAFETY: `stub` lies in the kernel text emitted by global_asm
+        // (readable); a single byte is read to verify the layout.
+        let first = unsafe { (stub as *const u8).read_volatile() };
+        if first != 0x6A {
+            // Expected `push imm8` (0x6A): the stubs are not 16 bytes apart.
+            return Err(CpuInitError::BadIrqStubs(vector));
+        }
+        if let Some(gate) = t.idt.get_mut(usize::from(vector)) {
+            *gate = Gate::interrupt(stub, KERNEL_CS, 0, 0);
+        }
     }
 
     let gdtr =
@@ -296,7 +388,23 @@ pub fn init() -> Result<(), CpuInitError> {
     // SAFETY: the IDT is fully populated for vectors 0-31 with valid stubs
     // and the rest are non-present gates; it lives in a static.
     unsafe { core::arch::asm!("lidt [{0}]", in(reg) &idtr, options(nostack, preserves_flags)) };
-    Ok(())
+
+    let f = cpu::features();
+    let mut cr4 = cpu::read_cr4();
+    let hardening = Hardening { smep: f.smep, smap: f.smap, umip: f.umip };
+    if f.smep {
+        cr4 |= cpu::CR4_SMEP;
+    }
+    if f.smap {
+        cr4 |= cpu::CR4_SMAP;
+    }
+    if f.umip {
+        cr4 |= cpu::CR4_UMIP;
+    }
+    // SAFETY: only features CPUID reports are enabled. No user-mode pages
+    // exist, so SMEP/SMAP cannot fault kernel code; UMIP affects CPL 3 only.
+    unsafe { cpu::write_cr4(cr4) };
+    Ok(hardening)
 }
 
 fn exception_name(vector: u64) -> &'static str {
@@ -338,6 +446,11 @@ extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
             kprintln_emergency!("trap: breakpoint at {:#x} (handled, resuming)", frame.rip.wrapping_sub(1));
         }
         2 => kprintln_emergency!("trap: NMI at {:#x} (ignored)", frame.rip),
+        v @ 32..=255 => {
+            IN_INTERRUPT.fetch_add(1, Ordering::Relaxed);
+            crate::interrupts::handle(v as u8);
+            IN_INTERRUPT.fetch_sub(1, Ordering::Relaxed);
+        }
         _ => fatal_exception(frame),
     }
 }

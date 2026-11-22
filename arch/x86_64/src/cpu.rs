@@ -219,3 +219,115 @@ pub unsafe fn inb(port: u16) -> u8 {
     unsafe { asm!("in al, dx", in("dx") port, out("al") v, options(nostack, nomem, preserves_flags)) };
     v
 }
+
+/// IA32_APIC_BASE MSR.
+pub const MSR_APIC_BASE: u32 = 0x1B;
+/// CR4.UMIP (user-mode instruction prevention).
+pub const CR4_UMIP: u64 = 1 << 11;
+/// CR4.SMEP (supervisor-mode execution prevention).
+pub const CR4_SMEP: u64 = 1 << 20;
+/// CR4.SMAP (supervisor-mode access prevention).
+pub const CR4_SMAP: u64 = 1 << 21;
+const RFLAGS_IF: u64 = 1 << 9;
+
+/// Writes CR4.
+///
+/// # Safety
+/// The new value must only enable features the CPU supports and must not
+/// invalidate assumptions of running code (e.g. clearing PAE).
+pub unsafe fn write_cr4(v: u64) {
+    // SAFETY: caller contract.
+    unsafe { asm!("mov cr4, {}", in(reg) v, options(nostack, preserves_flags)) };
+}
+
+/// CPU features coco checks at boot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Features {
+    /// Supervisor-mode execution prevention.
+    pub smep: bool,
+    /// Supervisor-mode access prevention.
+    pub smap: bool,
+    /// User-mode instruction prevention.
+    pub umip: bool,
+    /// x2APIC supported.
+    pub x2apic: bool,
+    /// Invariant TSC.
+    pub invariant_tsc: bool,
+}
+
+/// Queries CPUID for [`Features`].
+#[must_use]
+pub fn features() -> Features {
+    let max = cpuid(0, 0).eax;
+    let leaf7 = if max >= 7 { cpuid(7, 0) } else { CpuidResult::default() };
+    Features {
+        smep: leaf7.ebx & (1 << 7) != 0,
+        smap: leaf7.ebx & (1 << 20) != 0,
+        umip: leaf7.ecx & (1 << 2) != 0,
+        x2apic: cpuid(1, 0).ecx & (1 << 21) != 0,
+        invariant_tsc: has_invariant_tsc(),
+    }
+}
+
+/// True if maskable interrupts are enabled (RFLAGS.IF).
+#[must_use]
+pub fn interrupts_enabled() -> bool {
+    let flags: u64;
+    // SAFETY: reading RFLAGS has no side effects.
+    unsafe { asm!("pushfq", "pop {}", out(reg) flags, options(nomem, preserves_flags)) };
+    flags & RFLAGS_IF != 0
+}
+
+/// Enables maskable interrupts.
+///
+/// # Safety
+/// An IDT able to handle every unmasked interrupt source must be loaded,
+/// and no lock that interrupt handlers take may be held.
+pub unsafe fn enable_interrupts() {
+    // SAFETY: caller contract. Not `nomem`: acts as a compiler barrier at
+    // the end of a critical section.
+    unsafe { asm!("sti", options(nostack)) };
+}
+
+/// Atomically enables interrupts and halts until the next one (`sti; hlt`
+/// executes `hlt` in the interrupt shadow, so no wake-up is lost).
+///
+/// # Safety
+/// As for [`enable_interrupts`].
+pub unsafe fn enable_interrupts_and_halt() {
+    // SAFETY: caller contract.
+    unsafe { asm!("sti", "hlt", options(nostack)) };
+}
+
+/// Writes a 16-bit value to an I/O port.
+///
+/// # Safety
+/// As for [`outb`].
+pub unsafe fn outw(port: u16, value: u16) {
+    // SAFETY: caller contract.
+    unsafe { asm!("out dx, ax", in("dx") port, in("ax") value, options(nostack, nomem, preserves_flags)) };
+}
+
+/// Reads a 16-bit value from an I/O port.
+///
+/// # Safety
+/// As for [`inb`].
+#[must_use]
+pub unsafe fn inw(port: u16) -> u16 {
+    let v: u16;
+    // SAFETY: caller contract.
+    unsafe { asm!("in ax, dx", in("dx") port, out("ax") v, options(nostack, nomem, preserves_flags)) };
+    v
+}
+
+/// Reads a 32-bit value from an I/O port.
+///
+/// # Safety
+/// As for [`inb`].
+#[must_use]
+pub unsafe fn inl(port: u16) -> u32 {
+    let v: u32;
+    // SAFETY: caller contract.
+    unsafe { asm!("in eax, dx", in("dx") port, out("eax") v, options(nostack, nomem, preserves_flags)) };
+    v
+}

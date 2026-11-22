@@ -1,0 +1,11 @@
+[package]
+name = "coco-acpi"
+description = "Allocation-free, bounds-checked ACPI table parser (RSDP, XSDT/RSDT, MADT, FADT, HPET, DSDT \\_S5)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

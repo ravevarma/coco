@@ -2,11 +2,31 @@
 //! the physical frame allocator from the boot memory map and exposes a
 //! page-table mapper over the live address space.
 
-use coco_abi::layout::{DIRECT_MAP_BASE, PAGE_SIZE, phys_to_virt};
+use coco_abi::layout::{DIRECT_MAP_BASE, DIRECT_MAP_MAX_LEN, PAGE_SIZE, phys_to_virt};
 use coco_abi::{BootInfo, MemoryKind, MemoryRegion, flags};
 use coco_arch::cpu;
-use coco_memory::frame::{FrameAllocator, FrameError, words_for};
-use coco_memory::paging::{Mapper, PhysAccess, TableFrameSource};
+use coco_memory::frame::{FrameAllocator, FrameError, PhysFrame, words_for};
+use coco_memory::paging::{MapError, Mapper, PageFlags, PageSize, PhysAccess, TableFrameSource};
+
+use crate::sync::IrqSpinLock;
+
+/// The kernel's memory managers after [`install`].
+///
+/// Lock order (rule L3): `heap::HEAP` may be held while taking `MEMORY`
+/// (the heap grows by mapping frames); code holding `MEMORY` must never
+/// allocate from the heap.
+static MEMORY: IrqSpinLock<Option<KernelMemory>> = IrqSpinLock::new(None);
+
+/// Makes `mem` the global memory manager.
+pub fn install(mem: KernelMemory) {
+    *MEMORY.lock() = Some(mem);
+}
+
+/// Runs `f` with exclusive access to the memory managers (interrupts are
+/// disabled meanwhile). `None` before [`install`].
+pub fn with<R>(f: impl FnOnce(&mut KernelMemory) -> R) -> Option<R> {
+    MEMORY.lock().as_mut().map(f)
+}
 
 /// Frames below this address are never allocated: real-mode IVT/BDA, the
 /// future SMP trampoline, and protection against stray null-ish physical
@@ -174,4 +194,91 @@ pub fn init(info: &BootInfo, regions: &[MemoryRegion]) -> Result<KernelMemory, M
     // is the single owner of page-table mutation from here on.
     let mapper = unsafe { Mapper::new(root, DirectMap) };
     Ok(KernelMemory { frames, mapper, stats })
+}
+
+impl KernelMemory {
+    fn map_page(&mut self, virt: u64, phys: u64, flags: PageFlags) -> Result<(), MapError> {
+        let flush = self.mapper.map(virt, phys, PageSize::Size4K, flags, &mut AllocatorTables(&mut self.frames))?;
+        cpu::invlpg(flush.addr());
+        Ok(())
+    }
+
+    /// Ensures the page containing `phys` is readable through the direct
+    /// map (read-only, NX). Used for firmware tables that live outside the
+    /// RAM regions the loader mapped.
+    ///
+    /// # Errors
+    /// Mapping failures, or `phys` beyond the direct map.
+    pub fn ensure_direct_mapped(&mut self, phys: u64) -> Result<u64, MapError> {
+        let page = phys & !(PAGE_SIZE - 1);
+        let virt = phys_to_virt(page).ok_or(MapError::PhysOutOfRange)?;
+        if self.mapper.translate(virt).is_none() {
+            self.map_page(virt, page, PageFlags::NO_EXECUTE)?;
+        }
+        Ok(virt + (phys - page))
+    }
+
+    /// Maps the MMIO page containing `phys` uncached, writable and NX in the
+    /// direct map and returns the virtual address of `phys`.
+    ///
+    /// # Errors
+    /// Mapping failures, or `phys` beyond the direct map.
+    pub fn map_mmio(&mut self, phys: u64) -> Result<u64, MapError> {
+        if phys >= DIRECT_MAP_MAX_LEN {
+            return Err(MapError::PhysOutOfRange);
+        }
+        let page = phys & !(PAGE_SIZE - 1);
+        let virt = phys_to_virt(page).ok_or(MapError::PhysOutOfRange)?;
+        match self.mapper.translate(virt) {
+            // Already mapped (e.g. inside a RAM-backed 2 MiB page): MMIO
+            // must not alias cached RAM mappings, so refuse.
+            Some(t) if t.flags.contains(PageFlags::NO_CACHE) => {}
+            Some(_) => return Err(MapError::AlreadyMapped),
+            None => self.map_page(
+                virt,
+                page,
+                PageFlags::WRITABLE | PageFlags::NO_CACHE | PageFlags::WRITE_THROUGH | PageFlags::NO_EXECUTE,
+            )?,
+        }
+        Ok(virt + (phys - page))
+    }
+
+    /// Backs `[virt, virt + len)` with fresh zeroed frames (RW, NX).
+    /// All-or-nothing: on failure every page mapped by this call is
+    /// unmapped and its frame freed.
+    pub fn map_fresh(&mut self, virt: u64, len: u64) -> bool {
+        let pages = len / PAGE_SIZE;
+        for i in 0..pages {
+            let va = virt + i * PAGE_SIZE;
+            let ok = match self.frames.allocate() {
+                Ok(frame) => {
+                    let phys = frame.into_raw();
+                    let dm = DIRECT_MAP_BASE.wrapping_add(phys) as *mut u8;
+                    // SAFETY: the frame was just allocated (exclusively ours)
+                    // and is direct-mapped; zeroing prevents leaking stale
+                    // data into the heap.
+                    unsafe { core::ptr::write_bytes(dm, 0, PAGE_SIZE as usize) };
+                    if self.map_page(va, phys, PageFlags::WRITABLE | PageFlags::NO_EXECUTE).is_ok() {
+                        true
+                    } else {
+                        // SAFETY: mapping failed, so ownership is still ours.
+                        let _ = self.frames.free(unsafe { PhysFrame::from_raw(phys) });
+                        false
+                    }
+                }
+                Err(_) => false,
+            };
+            if !ok {
+                for j in 0..i {
+                    if let Ok((phys, _, flush)) = self.mapper.unmap(virt + j * PAGE_SIZE) {
+                        cpu::invlpg(flush.addr());
+                        // SAFETY: the mapping owned this frame (created above).
+                        let _ = self.frames.free(unsafe { PhysFrame::from_raw(phys) });
+                    }
+                }
+                return false;
+            }
+        }
+        true
+    }
 }

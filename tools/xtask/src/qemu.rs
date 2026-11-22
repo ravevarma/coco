@@ -46,6 +46,9 @@ struct Case {
     cmdline: Option<&'static str>,
     memory: &'static str,
     smp: u32,
+    cpu: &'static str,
+    /// Let the guest reboot (no `-no-reboot`).
+    allow_reboot: bool,
     disk: Disk,
     payload: Payload,
     /// Expected QEMU exit status, or `None` = run until `until` appears.
@@ -71,6 +74,7 @@ const fn case(
         cmdline: if cmdline.is_empty() { None } else { Some(cmdline) },
         memory: "256M",
         smp: 1,
+        cpu: "max",
         disk: Disk::Nvme,
         payload: Payload::Normal,
         exit: Some(exit),
@@ -79,11 +83,19 @@ const fn case(
         must_not,
         screenshot: false,
         repeat: 1,
+        allow_reboot: false,
     }
 }
 
 fn cases() -> Vec<Case> {
-    let selftest_ok: &[&str] = &["selftest summary: 5 passed, 0 failed", "coco: boot complete"];
+    let selftest_ok: &[&str] = &[
+        "selftest memory suite: 4 passed, 0 failed",
+        "selftest breakpoint: PASS",
+        "selftest heap: PASS",
+        "selftest timer: PASS",
+        "interrupts on",
+        "coco: boot complete",
+    ];
     vec![
         Case {
             name: "boot-default",
@@ -95,6 +107,10 @@ fn cases() -> Vec<Case> {
                 "framebuffer: 1280x800 ready",
                 "mm: loader identity map removed",
                 "security: NX on",
+                "SMEP on, SMAP on",
+                "IST guards on",
+                "acpi: MADT 1 CPUs (1 enabled)",
+                "calibrated against ACPI PM timer",
             ],
             must_not: NO_ERRORS,
             screenshot: true,
@@ -107,6 +123,80 @@ fn cases() -> Vec<Case> {
             memory: "1G",
             ..case("selftest-smp4-1G", "test=memory qemu-exit", EXIT_SUCCESS, selftest_ok, NO_ERRORS)
         },
+        Case {
+            smp: 4,
+            ..case(
+                "acpi-smp4",
+                "test=breakpoint qemu-exit",
+                EXIT_SUCCESS,
+                &["acpi: MADT 4 CPUs (4 enabled), 1 I/O APIC(s)"],
+                NO_ERRORS,
+            )
+        },
+        Case {
+            cpu: "qemu64",
+            ..case(
+                "selftest-cpu-qemu64",
+                "test=memory qemu-exit",
+                EXIT_SUCCESS,
+                &["selftest memory suite: 4 passed, 0 failed", "selftest timer: PASS", "SMEP off, SMAP off"],
+                NO_ERRORS,
+            )
+        },
+        Case {
+            cpu: "max,+x2apic",
+            ..case(
+                // QEMU 8.2 TCG does not implement x2APIC, so this verifies the
+                // refusal/fallback path; the x2APIC register path itself is
+                // unverified (see docs/quality-report.md).
+                "x2apic-unsupported-fallback",
+                "test=memory x2apic qemu-exit",
+                EXIT_SUCCESS,
+                &[
+                    "x2APIC requested but the CPU does not report it",
+                    "xAPIC mode; interrupts on",
+                    "selftest timer: PASS",
+                    "selftest memory suite: 4 passed, 0 failed",
+                ],
+                NO_ERRORS,
+            )
+        },
+        case("timer", "test=timer qemu-exit", EXIT_SUCCESS, &["selftest timer: PASS", "100 ticks took"], NO_ERRORS),
+        Case {
+            memory: "512M",
+            ..case(
+                "heap-stress-exhaustion",
+                "test=heap qemu-exit",
+                EXIT_SUCCESS,
+                &["selftest heap: PASS", "selftest heap-exhaustion: PASS", "before OOM"],
+                NO_ERRORS,
+            )
+        },
+        case(
+            "irq-alloc-refused",
+            "test=irq-alloc qemu-exit",
+            EXIT_FATAL,
+            &["heap: allocation of 8 bytes in interrupt context refused", "memory allocation of 8 bytes failed"],
+            &["was not refused"],
+        ),
+        Case {
+            allow_reboot: true,
+            ..case(
+                "lifecycle-3-boots",
+                "test=lifecycle cycles=3 qemu-exit",
+                0,
+                &[
+                    "lifecycle: boot 1 of 3",
+                    "lifecycle: boot 2 of 3",
+                    "lifecycle: boot 3 of 3",
+                    "power: reboot via ACPI reset register",
+                    "lifecycle: 3 boots complete",
+                    "power: entering ACPI S5",
+                ],
+                &["FATAL", "PANIC", "FAIL"],
+            )
+        },
+        case("shutdown", "test=shutdown qemu-exit", 0, &["power: entering ACPI S5 (SLP_TYP"], &["FAIL"]),
         Case {
             disk: Disk::Ahci,
             ..case("selftest-ahci", "test=memory qemu-exit", EXIT_SUCCESS, selftest_ok, NO_ERRORS)
@@ -195,7 +285,7 @@ fn cases() -> Vec<Case> {
             "unknown-test",
             "test=nonexistent qemu-exit",
             EXIT_FATAL,
-            &["fault-test nonexistent: FAIL: unknown test", "self-test FAILURE"],
+            &["selftest nonexistent: FAIL: unknown test", "self-test FAILURE"],
             &[],
         ),
         Case {
@@ -269,23 +359,26 @@ fn prepare_case(out: &Outputs, case: &Case, dir: &Path) -> Res<PathBuf> {
     Ok(disk)
 }
 
-fn qemu_command(
-    disk: &Path,
-    dir: &Path,
-    memory: &str,
+struct Machine<'a> {
+    memory: &'a str,
     smp: u32,
+    cpu: &'a str,
     ahci: bool,
-    serial: Option<&Path>,
-    qmp: Option<&Path>,
-) -> Res<Command> {
+    allow_reboot: bool,
+}
+
+fn qemu_command(disk: &Path, dir: &Path, m: &Machine<'_>, serial: Option<&Path>, qmp: Option<&Path>) -> Res<Command> {
     let vars = dir.join("OVMF_VARS.fd");
     fs::copy(OVMF_VARS, &vars).map_err(|e| format!("copy OVMF vars ({OVMF_VARS}): {e}"))?;
     let mut c = Command::new("qemu-system-x86_64");
-    c.args(["-machine", "q35", "-cpu", "max", "-m", memory, "-smp", &smp.to_string(), "-no-reboot"]);
+    c.args(["-machine", "q35", "-cpu", m.cpu, "-m", m.memory, "-smp", &m.smp.to_string()]);
+    if !m.allow_reboot {
+        c.arg("-no-reboot");
+    }
     c.arg("-drive").arg(format!("if=pflash,format=raw,readonly=on,file={OVMF_CODE}"));
     c.arg("-drive").arg(format!("if=pflash,format=raw,file={}", vars.display()));
     c.arg("-drive").arg(format!("file={},format=raw,if=none,id=disk0", disk.display()));
-    if ahci {
+    if m.ahci {
         c.args(["-device", "ide-hd,drive=disk0,bus=ide.0"]);
     } else {
         c.args(["-device", "nvme,serial=coco0,drive=disk0"]);
@@ -414,8 +507,14 @@ fn run_case(root: &Path, out: &Outputs, case: &Case, iteration: u32) -> Res<Outc
     let disk = prepare_case(out, case, &dir)?;
     let serial = dir.join("serial.log");
     let qmp = case.screenshot.then(|| dir.join("qmp.sock"));
-    let mut cmd =
-        qemu_command(&disk, &dir, case.memory, case.smp, case.disk == Disk::Ahci, Some(&serial), qmp.as_deref())?;
+    let machine = Machine {
+        memory: case.memory,
+        smp: case.smp,
+        cpu: case.cpu,
+        ahci: case.disk == Disk::Ahci,
+        allow_reboot: case.allow_reboot,
+    };
+    let mut cmd = qemu_command(&disk, &dir, &machine, Some(&serial), qmp.as_deref())?;
     cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     let start = Instant::now();
     let mut child = cmd.spawn().map_err(|e| format!("spawn qemu: {e}"))?;
@@ -554,5 +653,6 @@ pub fn interactive(out: &Outputs, cmdline: &str, memory: &str, smp: &str) -> Res
     let case = Case { cmdline: Some(cmdline), ..case("interactive", "", 0, &[], &[]) };
     let disk = prepare_case(out, &case, &dir)?;
     let smp: u32 = smp.parse().map_err(|_| "bad --smp")?;
-    run(&mut qemu_command(&disk, &dir, memory, smp, false, None, None)?)
+    let machine = Machine { memory, smp, cpu: "max", ahci: false, allow_reboot: true };
+    run(&mut qemu_command(&disk, &dir, &machine, None, None)?)
 }

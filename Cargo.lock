@@ -32,6 +32,10 @@ name = "coco-abi"
 version = "0.1.0"
 
 [[package]]
+name = "coco-acpi"
+version = "0.1.0"
+
+[[package]]
 name = "coco-arch-x86_64"
 version = "0.1.0"
 
@@ -54,6 +58,7 @@ name = "coco-kernel"
 version = "0.1.0"
 dependencies = [
  "coco-abi",
+ "coco-acpi",
  "coco-arch-x86_64",
  "coco-memory",
  "coco-sync",

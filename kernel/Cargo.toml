@@ -15,6 +15,7 @@ bench = false
 
 [dependencies]
 coco-abi.workspace = true
+coco-acpi.workspace = true
 coco-memory.workspace = true
 coco-sync.workspace = true
 coco-arch-x86_64.workspace = true
