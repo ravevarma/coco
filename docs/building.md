@@ -19,14 +19,22 @@
 | `cargo xtask qemu-test [filter]` | QEMU/OVMF boot matrix; logs in `target/coco/qemu/<case>/` |
 | `cargo xtask run [--cmdline "test=memory"] [--memory 512M] [--smp 2]` | interactive boot, serial on stdio |
 | `cargo xtask repro` | builds from two copies of the tree at different paths and compares SHA-256 of every artifact |
-| `rustup run nightly cargo miri test -p coco-abi -p coco-elf -p coco-memory -p coco-sync -p coco-arch-x86_64` | Miri |
+| `rustup run nightly cargo miri test -p coco-abi -p coco-acpi -p coco-elf -p coco-memory -p coco-sync -p coco-arch-x86_64` | Miri |
 | `RUSTFLAGS="--cfg loom" cargo test -p coco-sync --release --target-dir target/loom` | Loom |
-| `cd fuzz && cargo +nightly fuzz run elf_parse -- -max_total_time=300` | fuzzing (`elf_parse`, `memory_map`, `boot_info`) |
+| `cd fuzz && cargo +nightly fuzz run elf_parse -- -max_total_time=300` | fuzzing (`elf_parse`, `memory_map`, `boot_info`, `acpi_tables`) |
 
 ## Kernel command line (`\coco\cmdline.txt` on the ESP)
-* `test=memory` — in-kernel memory/paging/protection self-tests.
+* `test=memory` — frame allocator, paging, protection policy, heap churn,
+  timer accuracy and #BP self-tests.
+* `test=heap` — heap churn plus exhaustion/recovery (consumes free frames).
+* `test=timer` — 100 ticks measured against the TSC.
+* `test=lifecycle cycles=N` — run the memory suite, reboot via ACPI until N
+  boots are counted in CMOS, then power off via ACPI S5.
+* `test=shutdown` — ACPI S5 power-off.
+* `test=irq-alloc` — make the timer handler allocate (must be refused; fatal).
 * `test=breakpoint|pagefault|null|guard|stack-overflow|nx|wp|ud|divide|panic|locked-fault`
   — deliberate fault tests.
+* `x2apic` — switch the local APIC to x2APIC mode if the CPU supports it.
 * `qemu-exit` — report results through QEMU's `isa-debug-exit` device
   (only with `-device isa-debug-exit,iobase=0xf4,iosize=0x04`).
 

@@ -17,9 +17,15 @@ Legend: ✅ implemented and tested · 🟡 partial · ⬜ not started.
 | M2 | GDT/TSS/IDT, exception handling with IST | ✅ | 10 fault-class QEMU tests |
 | M2 | Physical frame allocator | ✅ | host property tests, Miri, in-kernel exhaustion test to 4 GiB |
 | M2 | Page-table mapper (map/unmap/translate, 4K/2M) | ✅ | model-based tests, Miri, in-kernel leak test |
-| M2 | Kernel heap allocator | ⬜ | next |
-| M2 | Timers (APIC/HPET/TSC), interrupts | ⬜ | next |
-| M2 | Demand paging, CoW, shared memory, quotas, reclamation, DMA buffers | ⬜ | later in M2/M5 |
+| M2 | Kernel heap allocator (hardened) | ✅ | host model tests + Miri; in-kernel churn, exhaustion/recovery, IRQ refusal |
+| M2 | ACPI tables (MADT, FADT, HPET, `_S5`) | ✅ | host tests, Miri, 31 M fuzz runs, QEMU |
+| M2 | Interrupts: IDT 256 vectors, PIC masked, local APIC (xAPIC) | ✅ | QEMU; x2APIC path 🟡 unverified |
+| M2 | TSC + APIC timer calibration, 100 Hz tick, `sti;hlt` idle | ✅ | `timer` case: 1,001 ms per 100 ticks |
+| M2 | IRQ-safe locks, lock order | ✅ | `fault-with-console-locked`, Loom (inner lock) |
+| M2 | IST guard pages; SMEP/SMAP/UMIP | ✅ | `protections` self-test |
+| M2 | Reboot (ACPI reset) and power-off (S5); lifecycle | ✅ | `lifecycle-3-boots`, `shutdown` |
+| M2 | Tickless idle, HPET as clock source | ⬜ | |
+| M2 | Demand paging, CoW, shared memory, quotas, reclamation, DMA buffers | ⬜ | with M3/M5 (need processes/drivers) |
 | M3 | Threads, scheduler, processes, syscalls, user mode | ⬜ | |
 | M4 | IPC, capabilities, userspace services | ⬜ | |
 | M5 | Storage, input, networking drivers | ⬜ | |

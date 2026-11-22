@@ -7,16 +7,16 @@ deny`). `unsafe_op_in_unsafe_fn` is denied, so unsafe functions also need
 explicit blocks. This document lists the invariants those justifications
 rely on.
 
-## Inventory (M1)
+## Inventory (M2, revision b60418a)
 
 | Crate | `unsafe {}` blocks | `unsafe fn` | `unsafe impl` | Purpose |
 |---|---:|---:|---:|---|
-| `coco-arch-x86_64` | 21 | 9 | 0 | privileged instructions, port I/O, UART |
+| `coco-arch-x86_64` | 28 | 15 | 0 | privileged instructions, port I/O, UART, CR4, interrupt flag |
 | `coco-boot` | 45 | 1 | 1 | UEFI FFI, page-table construction, handoff |
-| `coco-kernel` | 37 | 1 | 4 | descriptor tables, framebuffer, boot-info read, self-tests |
-| `coco-memory` | 2 | 3 | 0 (1 unsafe trait) | page-table entry read/write, frame token re-wrap |
+| `coco-kernel` | 77 | 1 | 5 | descriptor tables, APIC/HPET/PM-timer/CMOS/PIC I/O, framebuffer, boot-info read, allocator glue, self-tests |
+| `coco-memory` | 21 | 4 | 1 (+1 unsafe trait) | page-table entries, frame tokens, heap free lists |
 | `coco-sync` | 4 | 0 | 2 | lock guard dereference |
-| `coco-abi`, `coco-elf` | **0** | 0 | 0 | untrusted-input parsers are 100% safe Rust |
+| `coco-abi`, `coco-acpi`, `coco-elf` | **0** | 0 | 0 | untrusted-input parsers are 100% safe Rust |
 
 ## Memory
 
@@ -42,35 +42,48 @@ rely on.
 * **M6 — Boot info.** `BOOT_INFO` memory (header, region array, cmdline) is
   never reclaimed or written by the kernel, which is what makes the
   `&'static` slices into it sound.
-* **M7 — Stacks.** The boot stack has an unmapped guard page directly below
-  it; IST stacks (#DF, NMI, #MC; 16 KiB each, `.bss`) have no guard pages
-  yet (known limitation).
+* **M7 — Stacks.** The boot stack and each IST stack (#DF, NMI, #MC;
+  16 KiB each, `.bss`) have an unmapped guard page directly below them
+  (IST guards since M2).
 * **M8 — W^X.** No mapping is both writable and executable once the
   kernel has dropped the identity alias.
+* **M9 — MMIO.** Device registers are mapped uncached (PCD|PWT) and NX in
+  the direct map; `map_mmio` refuses a page already covered by a cached
+  mapping, so RAM and MMIO never alias with conflicting cache types.
+* **M10 — Heap.** The heap window (PML4 507) is used only by the heap;
+  every byte in its carved range belongs to exactly one live allocation,
+  free block or free run (see `coco_memory::heap`). Backing frames are
+  zeroed before mapping. The `GlobalAlloc` impl relies on the host-tested
+  guarantee that returned blocks are disjoint, aligned and large enough.
 
 ## CPU state
 
 * **C1 — Descriptor tables** (`cpu.rs` `TablesCell`): mutated only inside
   `cpu::init`, which runs once (guarded by an atomic flag) on the boot CPU
   with interrupts disabled; afterwards Rust never forms references to the
-  tables (the CPU writes the TSS busy bit).
+  tables (the CPU writes the TSS busy bit). The IRQ stub layout (16-byte
+  stride) is verified before the IDT is loaded.
 * **C2 — IST stacks** (`StacksCell`): Rust only computes their addresses.
-* **C3 — Interrupts** stay disabled for the whole of M1 (no IRQ sources are
-  configured). NMI and #MC can still arrive and run on IST stacks.
+* **C3 — Interrupts** are enabled only after the IDT covers all 256
+  vectors, the PICs are masked and the local APIC is configured. Handlers
+  (vectors ≥ 32) run with `IN_INTERRUPT` raised, take no locks and never
+  allocate (the allocator refuses and reports). Only the APIC timer is
+  unmasked.
 * **C4 — CPL 0 only.** All `coco_arch::cpu` register reads assume ring 0;
   there is no user mode yet.
 
 ## Locks and interrupt context
 
-* **L1 — IRQ safety.** A `SpinLock` that may be taken in an interrupt
-  handler must only be acquired with interrupts disabled. (M1 has no IRQ
-  handlers; the rule takes effect with the M2 timer.)
+* **L1 — IRQ safety.** Kernel-global locks are `IrqSpinLock`s: interrupts
+  are disabled while held and restored afterwards, so an interrupt can never
+  spin on a lock held by the code it interrupted.
 * **L2 — Trap paths never block.** Exception and panic handlers use
   `try_lock` and fall back to the lock-free UART path
   (`SerialPort::assume_init`). Verified by the `fault-with-console-locked`
   QEMU test.
-* **L3 — Lock order.** Only one lock exists (`CONSOLE`). New locks must be
-  added to an explicit order in this section.
+* **L3 — Lock order.** `HEAP` → `MEMORY` → `CONSOLE`. The heap grows by
+  taking `MEMORY`; code holding `MEMORY` never allocates; printing under
+  either is allowed. New locks must be added here.
 * **L4 — Ordering.** `SpinLock` acquires with `Acquire` and releases with
   `Release`; Loom verifies the protocol and detects a weakened variant
   (mutation test recorded in `docs/quality-report.md`).

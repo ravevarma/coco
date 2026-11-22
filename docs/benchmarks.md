@@ -1,21 +1,25 @@
 # Memory and performance measurements
 
-All numbers below were **measured** on revision `0c9c263` in this
-environment: QEMU 8.2.2 with **TCG software emulation (no KVM)**, OVMF
-2024.02, `-machine q35 -cpu max`, host with 4 vCPUs. TCG timings are not
-hardware timings; they are recorded as a regression baseline only. TSC
-values are cycles of QEMU's emulated TSC; coco does not yet calibrate the
-TSC, so no conversion to time is claimed.
+Measured in this environment: QEMU 8.2.2 with **TCG software emulation
+(no KVM)**, OVMF 2024.02, `-machine q35 -cpu max`, 4 host vCPUs. TCG
+timings are not hardware timings; they are a regression baseline only.
+Since M2 the TSC is calibrated against the ACPI PM timer (measured
+≈2.1 GHz under TCG), so cycle counts can be converted.
 
 ## Binary and image size
 
-| Artifact | Bytes |
-|---|---:|
-| `BOOTX64.EFI` (loader) | 31,232 |
-| `kernel.elf` | 41,664 |
-| Installed base (cluster-rounded, incl. directories) | 75,264 of 108,000,000 |
+| Artifact | M1 (`0c9c263`) | M2 (`b60418a`) |
+|---|---:|---:|
+| `BOOTX64.EFI` (loader) | 31,232 | 31,232 |
+| `kernel.elf` | 41,664 | 90,992 |
+| Installed base (cluster-rounded) | 75,264 | **124,416** of 108,000,000 |
+| Kernel image in memory (text + rodata + data/bss) | 88 KiB | 156 KiB (62 + 12 + 72, incl. 3 IST guard pages) |
 
-### Optimization experiments (measured, same source)
+The M2 growth comes from the heap and `alloc` collections, ACPI parsing,
+APIC/timer code and the in-kernel self-tests (which ship in the same
+binary so that the tested artifact is the released one).
+
+### Optimization experiments (M1 source, measured)
 
 | Change | Kernel file | Loader | Decision |
 |---|---:|---:|---|
@@ -26,56 +30,59 @@ TSC, so no conversion to time is claimed.
 | `opt-level = 2` | 49,856 | 33,792 | larger, no measured hot path yet |
 | `opt-level = 3` | 53,952 | 36,352 | larger, no measured hot path yet |
 
-Performance-oriented levels will be applied selectively once a hot path
-(scheduler, IPC, compositor) exists and shows a measured benefit.
+## Boot (host wall-clock, `cargo xtask qemu-test`, revision `b60418a`)
 
-## Boot (QEMU TCG, host wall-clock, `cargo xtask qemu-test`)
-
-| Case | Firmware start → kernel entry (s) | → test completion (s) |
+| Case | Firmware start → kernel entry (s) | → completion (s) |
 |---|---:|---:|
-| boot-default (256 MiB) | 1.94 | 2.52 (incl. screenshot) |
-| selftest-256M, 3 cold boots | 1.88 / 1.89 / 1.93 | 2.01 / 1.99 / 2.11 |
-| selftest-4G | 1.91 | 3.50 |
-| selftest-smp4-1G | 2.17 | 2.52 |
+| boot-default (256 MiB) | 2.09 | 2.68 (incl. screenshot) |
+| selftest-256M, 3 cold boots | 2.24 / 2.09 / 2.12 | 3.66 / 3.58 / 3.55 |
+| selftest-4G | 2.27 | 5.22 |
+| lifecycle: 3 boots + 2 ACPI resets + S5 power-off | 2.04 (first entry) | 6.46 |
 
-Almost all of the time to kernel entry is OVMF itself. Stage breakdown from
-the kernel's TSC log (boot-default, cycles): loader 30.7 M · handoff→entry
-0.13 M · CPU tables 2.9 M · framebuffer + splash 14.2 M · memory init 3.7 M.
-The splash is the most expensive kernel stage (volatile per-pixel writes to
-an uncached framebuffer under TCG); a back buffer is planned with the
-compositor.
+Kernel stage breakdown (boot-default, TSC cycles at ≈2.1 GHz):
+CPU tables 5.4 M · framebuffer + splash 24.2 M · memory init 6.4 M ·
+heap + ACPI + APIC/timer 127.1 M (≈60 ms; dominated by the 50 ms
+calibration busy-wait) · total kernel 166.5 M (≈79 ms).
 
-## Kernel memory footprint (steady state after boot, 256 MiB guest)
+## Kernel memory footprint (steady state, 256 MiB guest, no tests)
 
 | Item | KiB |
 |---|---:|
-| Kernel image (text 24 + rodata 8 + data/bss 56) | 88 |
+| Kernel image | 156 |
 | Boot stack | 64 |
-| Page tables built by the loader | 92 |
-| Boot info (header, memory map, cmdline) | 8 |
-| Frame-allocator bitmaps | 16 (384 at 4 GiB) |
-| **Total** | **268** |
+| Loader page tables | 92 |
+| Boot info | 8 |
+| Frame bitmaps | 16 (384 at 4 GiB) |
+| Heap mapped (1 allocation: ACPI info) | 64 |
+| **Total** | **400** |
 
-No heap exists yet. Free memory at 256 MiB: 63,717 frames (248 MiB);
-at 4 GiB: 1,046,661 frames (4,088 MiB).
+## Micro-benchmarks (in-kernel, TCG; `selftest-256M` last of 3 runs / `selftest-4G`, revision `b60418a`)
 
-## Allocator and paging micro-benchmarks (in-kernel, TCG)
-
-| Operation | 256 MiB guest | 4 GiB guest |
+| Operation | 256 MiB | 4 GiB |
 |---|---:|---:|
-| Frame alloc incl. 2 direct-map writes (cycles/frame, full exhaustion) | 2,575 | 2,691 |
-| Frame free incl. 2 direct-map reads (cycles/frame) | 968 | 374 |
-| 4 KiB map + write + read + unmap + invlpg + alloc/free (cycles/page) | 4,565 | 2,163 |
-| Page-table frames retained after 2,000 map/unmap cycles | 3 | 3 |
+| Frame alloc incl. 2 direct-map writes (cycles/frame, full exhaustion) | 2,775 | 2,814 |
+| Frame free incl. 2 direct-map reads | 376 | 388 |
+| 4 KiB map + write + read + unmap + invlpg + alloc/free (cycles/page) | 2,234 | 2,158 |
+| Heap churn (Vec growth, 2,250 boxed slices, 20 k BTreeMap ops ×3; cycles/op, poisoning on) | 1,986 | 2,223 |
+| Heap peak / mapped after churn | 8,078 / 8,924 KiB | same |
+| Heap exhaustion (512 MiB guest): 1 MiB blocks before clean OOM | 496 | — |
 
-## Idle CPU
+## Timer accuracy
 
-After boot the kernel executes `cli; hlt`. Host CPU used by the QEMU
-process over a 10 s window after `coco: boot complete`: **0.3%** (3 ticks
-at 100 Hz) — the vCPU is halted, not spinning.
+100 ticks at 100 Hz measured **1,001 ms** (256 MiB) and **1,000 ms**
+(4 GiB) by the calibrated TSC, with 0 spurious and 0 unexpected
+interrupts. Calibrated rates: TSC 2,102–2,108 MHz, APIC timer
+62.6–62.8 MHz after the ÷16 divider.
+
+## Idle CPU (host CPU used by QEMU over 10 s after boot)
+
+| Kernel state | Host CPU |
+|---|---:|
+| M1: `cli; hlt` (no interrupts) | 0.3% |
+| M2: `sti; hlt` with 100 Hz APIC tick | 1.3% |
 
 ## Not yet measurable
 
-Scheduler latency, interrupt latency, context switch cost, application
-launch time, window redraw latency, frame time and storage throughput need
-components that do not exist yet (timers, scheduler, compositor, drivers).
+Scheduler latency, context switches, application launch, redraw latency,
+frame time and storage throughput need components that do not exist yet.
+Interrupt latency will be measured once a second interrupt source exists.

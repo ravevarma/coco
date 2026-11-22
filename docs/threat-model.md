@@ -31,8 +31,13 @@ future user data, and availability of the boot path.
 | Malformed command line | ASCII validation + length cap | `reject-bad-cmdline`, fuzzing |
 | Integer overflow in parsers/allocators | checked arithmetic enforced by `clippy::arithmetic_side_effects`; release builds keep `overflow-checks = true` | lint gate |
 | Supply-chain compromise | zero third-party crates in shipped binaries; reproducible builds | `cargo tree`, `cargo xtask repro` |
+| Kernel heap misuse (double free, use-after-free write, invalid free) | exact double-free detection, poisoning, pointer validation; fatal stop | host tests, Miri |
+| Allocation from interrupt context (deadlock/corruption risk) | refused and reported | `irq-alloc-refused` |
+| Malformed ACPI tables | checksums enforced, bounded lengths/lists, checked arithmetic, no `unsafe` | host tests, 31 M fuzz runs |
+| Future user-space access/exec from kernel | SMEP, SMAP, UMIP enabled when supported | `protections` self-test |
+| IST stack overflow corrupting neighbours | guard pages | `protections` self-test |
 
 ## Not yet addressed (by design of the milestone order)
 User/kernel separation, syscall validation, capabilities, IOMMU/DMA
-isolation, KASLR, SMEP/SMAP enablement, stack canaries, secure randomness,
-signed updates and rollback protection. None of these are claimed.
+isolation, KASLR, stack canaries, secure randomness, signed updates and
+rollback protection. None of these are claimed.

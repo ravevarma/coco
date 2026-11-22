@@ -6,11 +6,13 @@ coco is an independent operating system for x86_64 UEFI machines, written
 from scratch in Rust: its own UEFI loader, its own kernel, its own boot
 protocol — no Linux, BSD, XNU, Windows or Redox underneath.
 
-> **Status: M0 + M1 complete — EXPERIMENTAL, NOT RELEASE READY.**
+> **Status: M0–M2 complete — EXPERIMENTAL, NOT RELEASE READY.**
 > coco boots in QEMU/OVMF to a framebuffer splash and serial console, with
-> exception handling, a physical frame allocator and a page-table mapper.
-> It has no scheduler, processes, drivers or applications yet and has never
-> run on physical hardware. See [docs/quality-report.md](docs/quality-report.md).
+> exception handling, a frame allocator, page-table mapper and hardened
+> kernel heap, ACPI discovery, a calibrated APIC timer with interrupts, and
+> ACPI reboot/power-off. It has no scheduler, processes, drivers or
+> applications yet and has never run on physical hardware.
+> See [docs/quality-report.md](docs/quality-report.md).
 
 ![coco boot screen in QEMU](docs/images/boot-splash.png)
 
@@ -19,15 +21,16 @@ protocol — no Linux, BSD, XNU, Windows or Redox underneath.
 | Component | Path | Notes |
 |---|---|---|
 | UEFI loader | `boot/` | reads and validates the kernel, builds W^X page tables, exits boot services, hands off |
-| Kernel | `kernel/` | GDT/TSS/IDT with IST, fatal-fault diagnostics, framebuffer console, frame allocator, self-tests |
+| Kernel | `kernel/` | GDT/TSS/IDT (256 vectors, guarded IST), fault diagnostics, framebuffer console, frame allocator, heap, ACPI, local APIC + 100 Hz timer, reboot/S5, self-tests |
+| ACPI parser | `crates/coco-acpi/` | RSDP/XSDT/MADT/FADT/HPET/`_S5`, no allocation, no `unsafe`, fuzzed |
 | Boot protocol | `crates/coco-abi/` | versioned `BootInfo`, memory map normalisation, cmdline parsing |
 | ELF parser | `crates/coco-elf/` | strict, allocation-free, fuzzed |
-| Memory | `crates/coco-memory/` | bitmap frame allocator, 4-level page-table mapper |
+| Memory | `crates/coco-memory/` | bitmap frame allocator, 4-level page-table mapper, hardened heap |
 | Sync | `crates/coco-sync/` | spin lock, Loom-checked |
 | Arch | `arch/x86_64/` | privileged instructions, descriptors, 16550 UART |
 | Tooling | `tools/xtask/` | build, GPT/FAT image, size gate, QEMU test matrix, reproducibility check |
 
-Base image today: **75,264 bytes** of the 108,000,000-byte budget
+Base image today: **124,416 bytes** of the 108,000,000-byte budget
 (see [docs/size-report.md](docs/size-report.md)).
 
 ## Quick start

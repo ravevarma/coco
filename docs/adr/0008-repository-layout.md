@@ -9,6 +9,8 @@ Deviations from the suggested tree, each with a reason:
   loader binary.
 * `crates/coco-sync` (added): synchronization primitives are shared by the
   kernel and must be model-checked with Loom on the host.
+* `crates/coco-acpi` (added, M2): firmware tables are untrusted input and
+  need host tests, Miri and fuzzing separate from the kernel.
 * `arch/x86_64` is the package `coco-arch-x86_64` (lib name `coco_arch`).
 * `crates/coco-scheduler`, `coco-ipc`, `coco-capability`, `coco-hal`,
   `coco-graphics`, `coco-ui`, `coco-document`, `coco-media`, `services/`,

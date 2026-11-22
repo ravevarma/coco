@@ -17,12 +17,22 @@ has been run on real hardware.
 | Display | GOP linear framebuffer 1280×800, BGRX | kernel `fb` | ✅ pixel-verified | `boot-default` screendump check |
 | Serial | 16550 UART at COM1 (0x3F8), 115200 8N1 | `coco_arch::serial` | ✅ | all cases |
 | Debug exit | `isa-debug-exit` at 0xF4 (QEMU only, opt-in `qemu-exit`) | kernel | ✅ | all exit-code cases |
+| CPU model | `-cpu qemu64` (no SMEP/SMAP/UMIP) | arch | ✅ features detected as absent | `selftest-cpu-qemu64` |
+| ACPI | RSDP 2.0, XSDT, MADT, FADT, HPET, DSDT `_S5` (QEMU q35 "BOCHS" tables) | `coco-acpi` | ✅ | `boot-default`, `acpi-smp4` |
+| Legacy PIC | 8259 pair | kernel | ✅ remapped + masked | all M2 cases |
+| Local APIC | xAPIC (MMIO 0xFEE00000), timer periodic 100 Hz | kernel | ✅ | `timer` (1,001 ms per 100 ticks) |
+| Local APIC | x2APIC | kernel | ⚠️ **unverified**: QEMU 8.2 TCG does not implement x2APIC; only the "not supported → stay in xAPIC" path is tested | `x2apic-unsupported-fallback` |
+| Reference clock | ACPI PM timer (port 0x608, 24-bit) | kernel | ✅ | all M2 cases |
+| Reference clock | HPET fallback | kernel | ⚠️ unverified (PM timer is always preferred on q35) | — |
+| Reset | FADT reset register (I/O 0xCF9) | kernel | ✅ | `lifecycle-3-boots` |
+| Soft off | ACPI S5 via PM1a (`_S5` = 0/0 on q35) | kernel | ✅ QEMU exits 0 | `shutdown`, `lifecycle-3-boots` |
+| CMOS | RTC/CMOS bytes 0x7E–0x7F (test boot counter only) | kernel | ✅ survives reset | `lifecycle-3-boots` |
 
 ## Not supported yet (planned milestone)
 
 | Area | Milestone |
 |---|---|
-| ACPI table parsing (RSDP address is already passed to the kernel), APIC, HPET/TSC calibration, timer interrupts | M2 |
+| I/O APIC routing, device interrupts | M5 |
 | SMP bring-up (APs), per-CPU data | M3 |
 | PCIe enumeration, NVMe/AHCI/xHCI/USB HID/VirtIO drivers (coco's own) | M5 |
 | Keyboard, touchpad, Wi-Fi, Ethernet, GPU acceleration, audio | M5–M10 |
