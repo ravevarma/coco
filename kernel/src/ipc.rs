@@ -154,9 +154,16 @@ pub fn create_pair() -> Result<(KObject, KObject), Error> {
 /// carries capabilities (see [`enqueue`]).
 static GRAPH: IrqSpinLock<()> = IrqSpinLock::new(());
 
+/// Most in-flight endpoints the cycle check may examine per send. The check
+/// runs with interrupts disabled, so its worst case must be small and fixed;
+/// a send whose reachability cannot be decided within the budget is refused
+/// with `NoResources` (conservative: it never admits a cycle).
+const REACH_BUDGET: usize = 4096;
+
 /// True if channel `from` can reach channel `target` through endpoints in
-/// flight (iterative depth-first search, bounded by the channel count).
+/// flight (iterative depth-first search with a fixed work budget).
 fn reaches(from: &Arc<Shared>, target: &Arc<Shared>) -> Result<bool, Error> {
+    let mut budget = REACH_BUDGET;
     let mut stack: Vec<Arc<Shared>> = Vec::new();
     let mut visited = alloc::collections::BTreeSet::new();
     stack.try_reserve(8).map_err(|_| Error::NoResources)?;
@@ -170,6 +177,7 @@ fn reaches(from: &Arc<Shared>, target: &Arc<Shared>) -> Result<bool, Error> {
         }
         let next: Vec<Arc<Shared>> =
             c.state.lock().in_flight().map(|t| Arc::clone(&t.object.channel().shared)).collect();
+        budget = budget.checked_sub(next.len().max(1)).ok_or(Error::NoResources)?;
         stack.extend(next);
     }
     Ok(false)

@@ -438,7 +438,11 @@ pub fn sleep(ticks: u64) {
     let enabled = arch::interrupts_enabled();
     arch::disable_interrupts();
     let until = crate::interrupts::ticks() + ticks.max(1);
-    switch_away(State::Sleeping(until));
+    // Re-block after an early wake-up (`wake` is shared with channel
+    // waits), so `sleep` always lasts at least `ticks` ticks.
+    while crate::interrupts::ticks() < until {
+        switch_away(State::Sleeping(until));
+    }
     if enabled {
         // SAFETY: as in `yield_now`.
         unsafe { arch::enable_interrupts() };

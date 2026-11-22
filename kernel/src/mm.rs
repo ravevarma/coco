@@ -141,7 +141,7 @@ pub fn init(info: &BootInfo, regions: &[MemoryRegion]) -> Result<KernelMemory, M
     }
     let top = regions.iter().filter(|r| allocatable(r)).map(region_end).max().unwrap_or(0);
     let frames_total = top / PAGE_SIZE;
-    let words = words_for(frames_total);
+    let words = words_for(frames_total).ok_or(MmError::NoBitmapStorage)?;
     let bitmap_bytes = (words as u64).saturating_mul(8).saturating_mul(2);
     let bitmap_pages = bitmap_bytes.div_ceil(PAGE_SIZE).max(1);
 

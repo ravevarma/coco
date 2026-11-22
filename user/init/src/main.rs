@@ -151,6 +151,33 @@ fn echo_service(h: u64) -> ! {
     }
 }
 
+fn syscall_bench() -> ! {
+    const N: u64 = 20_000;
+    let t0 = rdtsc();
+    for _ in 0..N {
+        black_box(sys(syscall::GET_PID, 0, 0, 0));
+    }
+    let per = rdtsc().wrapping_sub(t0) / N;
+    let mut b = [0u8; 20];
+    write("init: syscall bench: ");
+    write(fmt_u64(per, &mut b));
+    write(" cycles per GET_PID round trip\n");
+    exit(0)
+}
+
+fn yield_bench(n: u64) -> ! {
+    let t0 = rdtsc();
+    for _ in 0..n {
+        sys(syscall::YIELD, 0, 0, 0);
+    }
+    let per = rdtsc().wrapping_sub(t0) / n.max(1);
+    let mut b = [0u8; 20];
+    write("init: yield bench: ");
+    write(fmt_u64(per, &mut b));
+    write(" cycles per yield (includes the other process's turn)\n");
+    exit(0)
+}
+
 fn echo_client(h: u64) -> ! {
     const ROUNDS: u64 = 1000;
     let mut total = 0u64;
@@ -380,6 +407,8 @@ pub extern "sysv64" fn _start(mode: u64, arg: u64) -> ! {
         init_mode::EXIT_CODE => exit(arg),
         init_mode::ECHO_SERVICE => echo_service(arg),
         init_mode::ECHO_CLIENT => echo_client(arg),
+        init_mode::SYSCALL_BENCH => syscall_bench(),
+        init_mode::YIELD_BENCH => yield_bench(arg),
         init_mode::CAP_TESTS => {
             let failed = cap_tests();
             if failed == 0 {

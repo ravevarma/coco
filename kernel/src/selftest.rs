@@ -823,3 +823,33 @@ fn ipc_round(image: &[u8]) -> TestResult {
     }
     Ok(())
 }
+
+/// Performance baseline: system-call cost, process-to-process switch cost
+/// (two processes yielding to each other) and echo round trips.
+pub fn ipc_bench(image: &[u8]) -> TestResult {
+    use crate::ipc;
+    use crate::process::{self, Status};
+    use coco_abi::syscall::{init_mode as m, rights};
+    ensure(!image.is_empty(), "no init.elf loaded")?;
+    let rw = rights::READ | rights::WRITE;
+    ensure(
+        process::wait(process::spawn(image, m::SYSCALL_BENCH, 0).map_err(|_| "spawn")?) == Some(Status::Exited(0)),
+        "bench failed",
+    )?;
+    let a = process::spawn(image, m::YIELD_BENCH, 10_000).map_err(|_| "spawn")?;
+    let b = process::spawn(image, m::YIELD_BENCH, 10_000).map_err(|_| "spawn")?;
+    ensure(
+        process::wait(a) == Some(Status::Exited(0)) && process::wait(b) == Some(Status::Exited(0)),
+        "yield bench failed",
+    )?;
+    for _ in 0..2 {
+        let (a, b) = ipc::create_pair().map_err(|_| "channel create failed")?;
+        let service =
+            process::spawn_with_handles(image, m::ECHO_SERVICE, 0, alloc::vec![(b, rw)]).map_err(|_| "spawn")?;
+        let client =
+            process::spawn_with_handles(image, m::ECHO_CLIENT, 0, alloc::vec![(a, rw)]).map_err(|_| "spawn")?;
+        ensure(process::wait(client) == Some(Status::Exited(0)), "client failed")?;
+        ensure(process::wait(service) == Some(Status::Exited(0)), "service failed")?;
+    }
+    Ok(())
+}

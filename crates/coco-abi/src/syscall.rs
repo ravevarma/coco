@@ -197,6 +197,11 @@ pub mod init_mode {
     pub const ECHO_CLIENT: u64 = 11;
     /// Capability tests from user mode; exit(0) or the failing check number.
     pub const CAP_TESTS: u64 = 12;
+    /// Measure the cost of a minimal system call (`GET_PID`) and exit(0).
+    pub const SYSCALL_BENCH: u64 = 14;
+    /// Yield `arg` times, report cycles per yield, exit(0) (run two at once
+    /// to measure a process-to-process switch).
+    pub const YIELD_BENCH: u64 = 15;
 }
 
 #[cfg(test)]

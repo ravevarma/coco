@@ -22,7 +22,7 @@ impl Rng {
 }
 
 fn alloc_with(frames: u64) -> (Vec<u64>, Vec<u64>) {
-    (std::vec![0; words_for(frames)], std::vec![0; words_for(frames)])
+    (std::vec![0; words_for(frames).unwrap()], std::vec![0; words_for(frames).unwrap()])
 }
 
 // ---------------------------------------------------------------- frames
@@ -41,6 +41,23 @@ fn frame_basic_alloc_free() {
     a.free(f1).unwrap();
     assert_eq!(a.free_frames(), 4);
     assert!(a.check_invariants());
+}
+
+/// Regression (32-bit audit): sizes must never be truncated. On a 32-bit
+/// target 2^40 frames need 2^34 bitmap words, which does not fit in usize.
+#[test]
+fn frame_counts_never_truncate() {
+    let huge = 1u64 << 40;
+    #[cfg(target_pointer_width = "64")]
+    assert_eq!(words_for(huge), Some((huge / 64) as usize), "64-bit: exact");
+    #[cfg(target_pointer_width = "32")]
+    assert_eq!(words_for(huge), None, "32-bit: refused, never truncated");
+    let mut a = [0u64; 4];
+    let mut b = [0u64; 4];
+    let r = FrameAllocator::new(&mut a, &mut b, huge);
+    assert!(matches!(r, Err(FrameError::StorageTooSmall | FrameError::OutOfRange)), "tiny storage accepted");
+    assert_eq!(words_for(0), Some(0));
+    assert_eq!(words_for(65), Some(2));
 }
 
 #[test]

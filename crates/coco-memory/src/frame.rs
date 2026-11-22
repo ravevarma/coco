@@ -75,10 +75,12 @@ pub struct FrameAllocator<'a> {
     hint: usize,
 }
 
-/// Number of `u64` words needed per bitmap to track `frames` frames.
+/// Number of `u64` words needed per bitmap to track `frames` frames, or
+/// `None` if that does not fit in `usize` (possible on 32-bit targets:
+/// never truncate a size).
 #[must_use]
-pub const fn words_for(frames: u64) -> usize {
-    frames.div_ceil(64) as usize
+pub fn words_for(frames: u64) -> Option<usize> {
+    usize::try_from(frames.div_ceil(64)).ok()
 }
 
 impl<'a> FrameAllocator<'a> {
@@ -87,9 +89,10 @@ impl<'a> FrameAllocator<'a> {
     ///
     /// # Errors
     /// [`FrameError::StorageTooSmall`] if either bitmap is shorter than
-    /// [`words_for`]`(frames)`.
+    /// [`words_for`]`(frames)`; [`FrameError::OutOfRange`] if `frames`
+    /// cannot be indexed on this target.
     pub fn new(managed: &'a mut [u64], free: &'a mut [u64], frames: u64) -> Result<Self, FrameError> {
-        let words = words_for(frames);
+        let words = words_for(frames).ok_or(FrameError::OutOfRange)?;
         if managed.len() < words || free.len() < words {
             return Err(FrameError::StorageTooSmall);
         }
@@ -106,7 +109,10 @@ impl<'a> FrameAllocator<'a> {
         if frame >= self.frames {
             return Err(FrameError::OutOfRange);
         }
-        Ok(((frame / 64) as usize, 1u64 << (frame % 64)))
+        // `frame < frames` and `words_for(frames)` fitted in usize at
+        // construction, so this conversion cannot fail; checked anyway.
+        let word = usize::try_from(frame / 64).map_err(|_| FrameError::OutOfRange)?;
+        Ok((word, 1u64 << (frame % 64)))
     }
 
     /// Hands `[base, base + pages * 4096)` to the allocator as free memory.
@@ -142,7 +148,7 @@ impl<'a> FrameAllocator<'a> {
         }
         self.managed_count = self.managed_count.saturating_add(pages);
         self.free_count = self.free_count.saturating_add(pages);
-        self.hint = self.hint.min((base / PAGE_SIZE / 64) as usize);
+        self.hint = self.hint.min(usize::try_from(base / PAGE_SIZE / 64).unwrap_or(usize::MAX));
         Ok(())
     }
 

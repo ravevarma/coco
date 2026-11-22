@@ -216,6 +216,13 @@ fn cases() -> Vec<Case> {
             ],
             NO_ERRORS,
         ),
+        case(
+            "bench-ipc",
+            "test=bench qemu-exit",
+            EXIT_SUCCESS,
+            &["selftest bench: PASS", "syscall bench:", "yield bench:", "ipc echo: 1000 round trips verified"],
+            NO_ERRORS,
+        ),
         case("timer", "test=timer qemu-exit", EXIT_SUCCESS, &["selftest timer: PASS", "100 ticks took"], NO_ERRORS),
         Case {
             memory: "512M",
