@@ -1,0 +1,11 @@
+[package]
+name = "coco-memory"
+description = "coco physical frame allocator and x86_64 page-table mapper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

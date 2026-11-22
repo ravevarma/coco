@@ -1,0 +1,6 @@
+# Pinned toolchain for reproducible coco builds (see docs/building.md).
+[toolchain]
+channel = "1.97.0"
+components = ["rustfmt", "clippy", "rust-src", "llvm-tools"]
+targets = ["x86_64-unknown-uefi", "x86_64-unknown-none"]
+profile = "minimal"

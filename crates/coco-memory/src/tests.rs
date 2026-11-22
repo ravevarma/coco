@@ -1,0 +1,379 @@
+#![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+
+extern crate std;
+use std::collections::{BTreeMap, BTreeSet};
+use std::vec::Vec;
+
+use crate::PAGE_SIZE;
+use crate::frame::*;
+use crate::paging::*;
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+    }
+    fn below(&mut self, n: u64) -> u64 {
+        self.next() % n
+    }
+}
+
+fn alloc_with(frames: u64) -> (Vec<u64>, Vec<u64>) {
+    (std::vec![0; words_for(frames)], std::vec![0; words_for(frames)])
+}
+
+// ---------------------------------------------------------------- frames
+
+#[test]
+fn frame_basic_alloc_free() {
+    let (mut m, mut f) = alloc_with(1024);
+    let mut a = FrameAllocator::new(&mut m, &mut f, 1024).unwrap();
+    assert_eq!(a.allocate(), Err(FrameError::OutOfMemory));
+    a.add_free_range(0x10000, 4).unwrap();
+    assert_eq!(a.free_frames(), 4);
+    let f1 = a.allocate().unwrap();
+    assert_eq!(f1.addr(), 0x10000);
+    assert!(!a.is_free(0x10000));
+    assert_eq!(a.allocated_frames(), 1);
+    a.free(f1).unwrap();
+    assert_eq!(a.free_frames(), 4);
+    assert!(a.check_invariants());
+}
+
+#[test]
+fn frame_storage_and_range_errors() {
+    let mut small = [0u64; 1];
+    let mut small2 = [0u64; 1];
+    assert_eq!(FrameAllocator::new(&mut small, &mut small2, 65).unwrap_err(), FrameError::StorageTooSmall);
+    let (mut m, mut f) = alloc_with(128);
+    let mut a = FrameAllocator::new(&mut m, &mut f, 128).unwrap();
+    assert_eq!(a.add_free_range(0x1001, 1), Err(FrameError::Misaligned));
+    assert_eq!(a.add_free_range(127 * PAGE_SIZE, 2), Err(FrameError::OutOfRange));
+    assert_eq!(a.add_free_range(u64::MAX - 4095, 2), Err(FrameError::OutOfRange));
+    assert_eq!(a.add_free_range(0, u64::MAX), Err(FrameError::OutOfRange));
+    assert_eq!(a.add_free_range(0, 0), Ok(()));
+    a.add_free_range(0, 10).unwrap();
+    // Overlap is rejected atomically: the new frames 10..12 must not be added.
+    assert_eq!(a.add_free_range(8 * PAGE_SIZE, 4), Err(FrameError::AlreadyManaged));
+    assert_eq!(a.managed_frames(), 10);
+    assert!(!a.is_free(10 * PAGE_SIZE));
+    assert!(a.check_invariants());
+}
+
+#[test]
+fn frame_double_free_and_forgery_detected() {
+    let (mut m, mut f) = alloc_with(64);
+    let mut a = FrameAllocator::new(&mut m, &mut f, 64).unwrap();
+    a.add_free_range(0, 4).unwrap();
+    let fr = a.allocate().unwrap();
+    let raw = fr.into_raw();
+    // SAFETY: test re-wraps the frame it just took ownership of.
+    a.free(unsafe { PhysFrame::from_raw(raw) }).unwrap();
+    // SAFETY: deliberately forged to exercise runtime double-free detection.
+    assert_eq!(a.free(unsafe { PhysFrame::from_raw(raw) }), Err(FrameError::DoubleFree));
+    // SAFETY: deliberately forged token for an unmanaged frame.
+    assert_eq!(a.free(unsafe { PhysFrame::from_raw(40 * PAGE_SIZE) }), Err(FrameError::NotManaged));
+    // SAFETY: deliberately forged misaligned token.
+    assert_eq!(a.free(unsafe { PhysFrame::from_raw(3) }), Err(FrameError::Misaligned));
+    // SAFETY: deliberately forged out-of-range token.
+    assert_eq!(a.free(unsafe { PhysFrame::from_raw(1 << 40) }), Err(FrameError::OutOfRange));
+    assert_eq!(a.free_frames(), 4);
+    assert!(a.check_invariants());
+}
+
+/// Exhaust memory, verify OOM is reported (not a panic), then free everything
+/// and verify the allocator returns to its exact initial state (leak check).
+#[test]
+fn frame_exhaustion_and_recovery() {
+    let frames = 4096u64;
+    let (mut m, mut f) = alloc_with(frames);
+    let mut a = FrameAllocator::new(&mut m, &mut f, frames).unwrap();
+    a.add_free_range(0x1000, 1000).unwrap();
+    a.add_free_range(0x80_0000, 1000).unwrap(); // frames 2048..3048 (bitmap covers 4096)
+    for round in 0..3 {
+        let mut held = Vec::new();
+        let mut seen = BTreeSet::new();
+        loop {
+            match a.allocate() {
+                Ok(fr) => {
+                    assert!(seen.insert(fr.addr()), "frame handed out twice");
+                    held.push(fr);
+                }
+                Err(e) => {
+                    assert_eq!(e, FrameError::OutOfMemory);
+                    break;
+                }
+            }
+        }
+        assert_eq!(held.len(), 2000, "round {round}");
+        assert_eq!(a.free_frames(), 0);
+        assert_eq!(a.allocate(), Err(FrameError::OutOfMemory));
+        for fr in held {
+            a.free(fr).unwrap();
+        }
+        assert_eq!(a.free_frames(), 2000);
+        assert!(a.check_invariants());
+    }
+}
+
+/// Property test against a model: random interleavings of allocate/free.
+#[test]
+fn frame_random_ops_match_model() {
+    let frames = 2048u64;
+    let (mut m, mut f) = alloc_with(frames);
+    let mut a = FrameAllocator::new(&mut m, &mut f, frames).unwrap();
+    let mut rng = Rng(42);
+    let mut usable = BTreeSet::new();
+    let mut base = 0u64;
+    while base < frames {
+        let len = 1 + rng.below(50);
+        if rng.below(2) == 0 && base + len <= frames {
+            a.add_free_range(base * PAGE_SIZE, len).unwrap();
+            usable.extend(base..base + len);
+        }
+        base += len + rng.below(20);
+    }
+    let mut held: Vec<PhysFrame> = Vec::new();
+    let mut held_set = BTreeSet::new();
+    for _ in 0..if cfg!(miri) { 3000 } else { 100_000 } {
+        if rng.below(3) != 0 {
+            match a.allocate() {
+                Ok(fr) => {
+                    let n = fr.addr() / PAGE_SIZE;
+                    assert!(usable.contains(&n), "allocated unmanaged frame");
+                    assert!(held_set.insert(n), "duplicate allocation");
+                    held.push(fr);
+                }
+                Err(e) => {
+                    assert_eq!(e, FrameError::OutOfMemory);
+                    assert_eq!(held.len() as u64, a.managed_frames());
+                }
+            }
+        } else if !held.is_empty() {
+            let i = rng.below(held.len() as u64) as usize;
+            let fr = held.swap_remove(i);
+            held_set.remove(&(fr.addr() / PAGE_SIZE));
+            a.free(fr).unwrap();
+        }
+        assert_eq!(a.allocated_frames(), held.len() as u64);
+    }
+    assert!(a.check_invariants());
+    for fr in held {
+        a.free(fr).unwrap();
+    }
+    assert_eq!(a.free_frames(), usable.len() as u64);
+}
+
+// ---------------------------------------------------------------- paging
+
+/// Simulated physical memory: `frames` 4 KiB frames at physical 0.
+/// The arena pointer is derived once so raw accesses stay valid under Miri.
+struct Sim {
+    _storage: Vec<u64>,
+    base: *mut u64,
+    frames: u64,
+}
+
+impl Sim {
+    fn new(frames: u64) -> Self {
+        let mut storage = std::vec![0u64; (frames * 512) as usize];
+        let base = storage.as_mut_ptr();
+        Self { _storage: storage, base, frames }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SimAccess(*mut u64, u64);
+
+// SAFETY: every table address the mapper uses comes from `SimFrames`, which
+// only returns frames inside the arena; the arena outlives the mapper and no
+// references into it are held while the mapper runs.
+unsafe impl PhysAccess for SimAccess {
+    fn table(&self, phys: u64) -> *mut u64 {
+        assert!(phys.is_multiple_of(PAGE_SIZE) && phys / PAGE_SIZE < self.1, "table outside arena: {phys:#x}");
+        self.0.wrapping_add((phys / 8) as usize)
+    }
+}
+
+struct SimFrames {
+    next: u64,
+    limit: u64,
+    handed: u64,
+}
+
+impl TableFrameSource for SimFrames {
+    fn allocate_table(&mut self) -> Option<u64> {
+        if self.next >= self.limit {
+            return None;
+        }
+        let f = self.next * PAGE_SIZE;
+        self.next += 1;
+        self.handed += 1;
+        Some(f)
+    }
+}
+
+fn mapper(sim: &Sim, table_frames: u64) -> (Mapper<SimAccess>, SimFrames) {
+    // Frame 0 is the root; tables come from frames 1..=table_frames.
+    // SAFETY: frame 0 of a zeroed arena is a valid empty PML4 and the arena
+    // is only reached through this mapper.
+    let m = unsafe { Mapper::new(0, SimAccess(sim.base, sim.frames)) };
+    (m, SimFrames { next: 1, limit: 1 + table_frames, handed: 0 })
+}
+
+const KBASE: u64 = 0xFFFF_FFFF_8000_0000;
+
+#[test]
+fn map_translate_unmap_4k() {
+    let sim = Sim::new(16);
+    let (mut m, mut fs) = mapper(&sim, 15);
+    let flags = PageFlags::WRITABLE | PageFlags::NO_EXECUTE;
+    m.map(KBASE, 0x1234_5000, PageSize::Size4K, flags, &mut fs).unwrap().ignore();
+    assert_eq!(fs.handed, 3); // PDPT, PD, PT
+    let t = m.translate(KBASE + 0x123).unwrap();
+    assert_eq!(t.phys, 0x1234_5123);
+    assert_eq!(t.size, PageSize::Size4K);
+    assert!(t.flags.contains(PageFlags::PRESENT | PageFlags::WRITABLE | PageFlags::NO_EXECUTE));
+    assert!(!t.flags.contains(PageFlags::USER));
+    assert_eq!(m.translate(KBASE + 0x1000), None);
+    // Second page in the same table needs no new tables.
+    m.map(KBASE + 0x1000, 0x5000, PageSize::Size4K, PageFlags::EMPTY, &mut fs).unwrap().ignore();
+    assert_eq!(fs.handed, 3);
+    assert_eq!(m.map(KBASE, 0x6000, PageSize::Size4K, flags, &mut fs).unwrap_err(), MapError::AlreadyMapped);
+    let (phys, size, flush) = m.unmap(KBASE + 0x10).unwrap();
+    assert_eq!((phys, size, flush.addr()), (0x1234_5000, PageSize::Size4K, KBASE));
+    assert_eq!(m.translate(KBASE), None);
+    assert_eq!(m.unmap(KBASE).unwrap_err(), MapError::NotMapped);
+    // Remap after unmap works.
+    m.map(KBASE, 0x7000, PageSize::Size4K, flags, &mut fs).unwrap().ignore();
+    assert_eq!(m.translate(KBASE).unwrap().phys, 0x7000);
+}
+
+#[test]
+fn map_2m_and_conflicts() {
+    let sim = Sim::new(16);
+    let (mut m, mut fs) = mapper(&sim, 15);
+    let v = 0xFFFF_8000_0020_0000;
+    m.map(v, 0x20_0000, PageSize::Size2M, PageFlags::WRITABLE, &mut fs).unwrap().ignore();
+    let t = m.translate(v + 0x1_2345).unwrap();
+    assert_eq!((t.phys, t.size), (0x21_2345, PageSize::Size2M));
+    assert!(t.flags.contains(PageFlags::HUGE));
+    // 4K inside a 2M leaf is a size conflict, not a silent split.
+    assert_eq!(m.map(v + 0x1000, 0, PageSize::Size4K, PageFlags::EMPTY, &mut fs).unwrap_err(), MapError::SizeConflict);
+    // 2M over an existing 4K table is a size conflict.
+    m.map(v + 0x20_0000, 0, PageSize::Size4K, PageFlags::EMPTY, &mut fs).unwrap().ignore();
+    assert_eq!(
+        m.map(v + 0x20_0000, 0, PageSize::Size2M, PageFlags::EMPTY, &mut fs).unwrap_err(),
+        MapError::SizeConflict
+    );
+    let (phys, size, _f) = m.unmap(v + 0x1000).unwrap();
+    assert_eq!((phys, size), (0x20_0000, PageSize::Size2M));
+}
+
+#[test]
+fn map_rejects_invalid_requests() {
+    let sim = Sim::new(8);
+    let (mut m, mut fs) = mapper(&sim, 7);
+    let e = |m: &mut Mapper<SimAccess>, fs: &mut SimFrames, v, p, s, f| m.map(v, p, s, f, fs).unwrap_err();
+    assert_eq!(
+        e(&mut m, &mut fs, 0x0000_8000_0000_0000, 0, PageSize::Size4K, PageFlags::EMPTY),
+        MapError::NonCanonical
+    );
+    assert_eq!(e(&mut m, &mut fs, KBASE + 1, 0, PageSize::Size4K, PageFlags::EMPTY), MapError::Misaligned);
+    assert_eq!(e(&mut m, &mut fs, KBASE, 0x1000, PageSize::Size2M, PageFlags::EMPTY), MapError::Misaligned);
+    assert_eq!(e(&mut m, &mut fs, KBASE, 1 << 52, PageSize::Size4K, PageFlags::EMPTY), MapError::PhysOutOfRange);
+    assert_eq!(e(&mut m, &mut fs, KBASE, 0, PageSize::Size4K, PageFlags::HUGE), MapError::InvalidFlags);
+    assert_eq!(e(&mut m, &mut fs, KBASE, 0, PageSize::Size4K, PageFlags::from_bits(1 << 52)), MapError::InvalidFlags);
+    assert_eq!(m.unmap(0x0000_8000_0000_0000).unwrap_err(), MapError::NonCanonical);
+    assert_eq!(m.translate(0x0000_8000_0000_0000), None);
+}
+
+#[test]
+fn map_reports_table_exhaustion() {
+    let sim = Sim::new(4);
+    let (mut m, mut fs) = mapper(&sim, 2); // needs 3 for a 4K mapping
+    assert_eq!(m.map(KBASE, 0, PageSize::Size4K, PageFlags::EMPTY, &mut fs).unwrap_err(), MapError::OutOfFrames);
+    assert_eq!(m.translate(KBASE), None);
+}
+
+#[test]
+fn user_bit_propagates_to_intermediates() {
+    let sim = Sim::new(8);
+    let (mut m, mut fs) = mapper(&sim, 7);
+    m.map(0x40_0000, 0x1000, PageSize::Size4K, PageFlags::USER, &mut fs).unwrap().ignore();
+    assert!(m.root_entry(0) & PageFlags::USER.bits() != 0);
+    m.map(KBASE, 0x2000, PageSize::Size4K, PageFlags::EMPTY, &mut fs).unwrap().ignore();
+    assert!(m.root_entry(511) & PageFlags::USER.bits() == 0, "kernel tables must not be user-accessible");
+}
+
+/// Model-based property test: random map/unmap of 4K and 2M pages across
+/// several PML4 slots, checked against a BTreeMap after each step.
+#[test]
+fn paging_random_ops_match_model() {
+    let sim = Sim::new(600);
+    let (mut m, mut fs) = mapper(&sim, 599);
+    let mut rng = Rng(7);
+    let mut model: BTreeMap<u64, (u64, PageSize)> = BTreeMap::new();
+    // Level-2 slots that own a 4K page table. The mapper never frees
+    // intermediate tables, so a 2M mapping there is a size conflict even
+    // after every 4K page was unmapped (documented behaviour).
+    let mut tabled: BTreeSet<u64> = BTreeSet::new();
+    let regions = [0x0000_0000_0000_0000u64, 0xFFFF_8000_0000_0000, KBASE, 0x0000_7F00_0000_0000];
+    for step in 0..if cfg!(miri) { 1500 } else { 20_000 } {
+        let size = if rng.below(4) == 0 { PageSize::Size2M } else { PageSize::Size4K };
+        let region = regions[rng.below(regions.len() as u64) as usize];
+        let slot = rng.below(64);
+        let v = region + slot * LARGE_PAGE_SIZE + if size == PageSize::Size4K { rng.below(512) * PAGE_SIZE } else { 0 };
+        let large_base = v & !(LARGE_PAGE_SIZE - 1);
+        if rng.below(2) == 0 {
+            let p = (rng.below(1 << 20) * size.bytes()) & 0x000F_FFFF_FFFF_F000;
+            let result = m.map(v, p, size, PageFlags::WRITABLE, &mut fs);
+            let conflict = match size {
+                PageSize::Size2M => {
+                    tabled.contains(&large_base)
+                        || model.range(large_base..large_base + LARGE_PAGE_SIZE).next().is_some()
+                }
+                PageSize::Size4K => {
+                    model.contains_key(&v) || model.get(&large_base).is_some_and(|e| e.1 == PageSize::Size2M)
+                }
+            };
+            assert_eq!(result.is_ok(), !conflict, "step {step} map {v:#x} {size:?}");
+            if let Ok(f) = result {
+                f.ignore();
+                model.insert(v, (p, size));
+                if size == PageSize::Size4K {
+                    tabled.insert(large_base);
+                }
+            }
+        } else {
+            let result = m.unmap(v);
+            let key = if model.get(&large_base).is_some_and(|e| e.1 == PageSize::Size2M) { large_base } else { v };
+            match model.remove(&key) {
+                Some((p, s)) => {
+                    let (phys, size, _f) = result.unwrap();
+                    assert_eq!((phys, size), (p, s));
+                }
+                None => assert_eq!(result.unwrap_err(), MapError::NotMapped),
+            }
+        }
+        if step % 512 == 0 {
+            for (&v, &(p, s)) in &model {
+                let t = m.translate(v + 8).unwrap();
+                assert_eq!((t.phys, t.size), (p + 8, s));
+            }
+        }
+    }
+}
+
+#[test]
+fn canonical_addresses() {
+    assert!(is_canonical(0));
+    assert!(is_canonical(0x0000_7FFF_FFFF_FFFF));
+    assert!(!is_canonical(0x0000_8000_0000_0000));
+    assert!(!is_canonical(0xFFFF_7FFF_FFFF_FFFF));
+    assert!(is_canonical(0xFFFF_8000_0000_0000));
+    assert!(is_canonical(u64::MAX));
+}

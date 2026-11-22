@@ -1,0 +1,23 @@
+[package]
+name = "coco-kernel"
+description = "The coco kernel"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "coco-kernel"
+test = false
+bench = false
+
+[dependencies]
+coco-abi.workspace = true
+coco-memory.workspace = true
+coco-sync.workspace = true
+coco-arch-x86_64.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,8 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+# The kernel is a static, non-PIE ELF linked in the top 2 GiB
+# (the loader does not apply relocations). `cargo xtask` passes the same
+# flags plus path remapping for reproducible builds.
+[target.x86_64-unknown-none]
+rustflags = ["-C", "relocation-model=static", "-C", "code-model=kernel"]

@@ -1,0 +1,11 @@
+[package]
+name = "coco-abi"
+description = "coco boot protocol: loader-to-kernel handoff structures, memory layout and validation"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,71 @@
+[workspace]
+resolver = "3"
+members = [
+    "arch/x86_64",
+    "boot",
+    "kernel",
+    "crates/coco-abi",
+    "crates/coco-elf",
+    "crates/coco-memory",
+    "crates/coco-sync",
+    "tools/xtask",
+]
+# Host-testable crates. The loader and kernel are built only for their bare-metal
+# targets through `cargo xtask`, never for the host.
+default-members = [
+    "arch/x86_64",
+    "crates/coco-abi",
+    "crates/coco-elf",
+    "crates/coco-memory",
+    "crates/coco-sync",
+    "tools/xtask",
+]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+coco-abi = { path = "crates/coco-abi" }
+coco-elf = { path = "crates/coco-elf" }
+coco-memory = { path = "crates/coco-memory" }
+coco-sync = { path = "crates/coco-sync" }
+coco-arch-x86_64 = { path = "arch/x86_64" }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+unused_must_use = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+mem_forget = "deny"
+cast_ptr_alignment = "deny"
+ptr_as_ptr = "warn"
+as_conversions = "allow"
+missing_safety_doc = "deny"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+debug = false
+strip = "symbols"
+incremental = false
+overflow-checks = true

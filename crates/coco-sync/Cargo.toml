@@ -1,0 +1,15 @@
+[package]
+name = "coco-sync"
+description = "coco synchronization primitives (model-checked with loom on the host)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Only present when model-checking: RUSTFLAGS="--cfg loom". Never in kernel builds.
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"

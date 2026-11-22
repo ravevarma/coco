@@ -1,0 +1,34 @@
+[package]
+name = "coco-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+coco-elf = { path = "../crates/coco-elf" }
+coco-abi = { path = "../crates/coco-abi" }
+
+[[bin]]
+name = "elf_parse"
+path = "fuzz_targets/elf_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "memory_map"
+path = "fuzz_targets/memory_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "boot_info"
+path = "fuzz_targets/boot_info.rs"
+test = false
+doc = false
+bench = false
