@@ -1,6 +1,6 @@
 //! Interrupt controllers and the system tick.
 //!
-//! * The legacy 8259 PICs are remapped to vectors 0x20-0x2F and fully
+//! * The legacy 8259 PICs are remapped to vectors 0x30-0x3F and fully
 //!   masked (only their spurious vectors can still arrive).
 //! * The boot CPU's local APIC is used in whichever mode the firmware left
 //!   it (xAPIC via uncached MMIO, or x2APIC via MSRs).
@@ -26,7 +26,11 @@ pub const TIMER_VECTOR: u8 = 0x20;
 pub const ERROR_VECTOR: u8 = 0xFE;
 /// Local APIC spurious vector.
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
-const PIC_SPURIOUS: [u8; 2] = [0x27, 0x2F];
+/// PIC vectors after remapping (0x30-0x3F, clear of the APIC timer at
+/// 0x20); only their spurious IRQ7/IRQ15 can arrive because all lines are
+/// masked.
+const PIC_BASE: u8 = 0x30;
+const PIC_SPURIOUS: [u8; 2] = [PIC_BASE + 7, PIC_BASE + 15];
 
 const LAPIC_TPR: u32 = 0x80;
 const LAPIC_EOI: u32 = 0xB0;
@@ -113,8 +117,8 @@ fn disable_pic() {
     };
     out(0x20, 0x11);
     out(0xA0, 0x11);
-    out(0x21, 0x20); // master base vector
-    out(0xA1, 0x28); // slave base vector
+    out(0x21, PIC_BASE); // master base vector
+    out(0xA1, PIC_BASE + 8); // slave base vector
     out(0x21, 0x04);
     out(0xA1, 0x02);
     out(0x21, 0x01);

@@ -187,6 +187,23 @@ fn cases() -> Vec<Case> {
             ],
             NO_ERRORS,
         ),
+        Case {
+            cpu: "qemu64",
+            ..case(
+                "user-isolation-no-smap",
+                "test=user qemu-exit",
+                EXIT_SUCCESS,
+                &["SMEP off, SMAP off", "selftest user: PASS", "user isolation: kernel memory read: killed"],
+                NO_ERRORS,
+            )
+        },
+        case(
+            "soak-60s",
+            "test=soak secs=60 qemu-exit",
+            EXIT_SUCCESS,
+            &["selftest soak: PASS", "frames/heap at baseline"],
+            &["FATAL", "PANIC", "FAIL", "not back to baseline"],
+        ),
         case("timer", "test=timer qemu-exit", EXIT_SUCCESS, &["selftest timer: PASS", "100 ticks took"], NO_ERRORS),
         Case {
             memory: "512M",

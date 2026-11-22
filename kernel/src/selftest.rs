@@ -649,3 +649,84 @@ pub fn user_suite(image: &[u8]) -> TestResult {
     ensure(frames == frames0, "frames leaked by process lifecycle")?;
     ensure(heap == heap0, "heap leaked by process lifecycle")
 }
+
+/// Long-running stability test: for `seconds` of uptime, repeatedly churns
+/// user processes (normal exits plus one killed faulting process), kernel
+/// threads and the heap, and requires free frames and heap use to return to
+/// their baseline after every round (no growth over time).
+pub fn soak(image: &[u8], seconds: u64) -> TestResult {
+    use crate::process::{self, Status};
+    use crate::sched;
+    use coco_abi::syscall::init_mode as m;
+    use core::sync::atomic::AtomicU64;
+    ensure(!image.is_empty(), "no init.elf loaded")?;
+    // Warm-up round creates the shared kernel tables used by later rounds.
+    let warm = process::spawn(image, m::EXIT_CODE, 0).map_err(|_| "spawn failed")?;
+    ensure(process::wait(warm) == Some(Status::Exited(0)), "warm-up failed")?;
+    let t = sched::spawn_kernel("warm", || {}).map_err(|_| "spawn failed")?;
+    sched::join(t);
+    let frames0 = free_frames();
+    let heap0 = heap_in_use();
+    let end = interrupts::ticks() + seconds * interrupts::HZ;
+    static WORK: AtomicU64 = AtomicU64::new(0);
+    let mut rounds = 0u64;
+    let mut processes = 0u64;
+    while interrupts::ticks() < end {
+        let mut pids = [0u64; 8];
+        for (i, slot) in pids.iter_mut().enumerate() {
+            *slot = process::spawn(image, m::EXIT_CODE, rounds + i as u64).map_err(|_| "spawn failed")?;
+        }
+        let faulty = process::spawn(image, m::FAULT_NULL, 0).map_err(|_| "spawn failed")?;
+        let mut tids = [0u64; 4];
+        for slot in &mut tids {
+            *slot = sched::spawn_kernel("soak", || {
+                let v: Vec<u64> = (0..512).collect();
+                WORK.fetch_add(v.iter().sum::<u64>(), Ordering::Relaxed);
+            })
+            .map_err(|_| "spawn failed")?;
+        }
+        for (i, pid) in pids.iter().enumerate() {
+            ensure(process::wait(*pid) == Some(Status::Exited(rounds + i as u64)), "wrong exit status")?;
+        }
+        ensure(matches!(process::wait(faulty), Some(Status::Killed(_))), "faulty process not killed")?;
+        for t in tids {
+            sched::join(t);
+        }
+        sched::reap();
+        processes += 9;
+        rounds += 1;
+        if free_frames() != frames0 || heap_in_use() != heap0 {
+            kprintln!(
+                "  soak: round {}: frames {} (baseline {}), heap {} (baseline {})",
+                rounds,
+                free_frames(),
+                frames0,
+                heap_in_use(),
+                heap0
+            );
+            let snap = sched::snapshot();
+            kprintln!("  soak: scheduler {:?}", snap);
+            kprintln!("  soak: processes {}, heap stats {:?}", process::count(), heap::stats());
+            return Err("memory not back to baseline after a soak round");
+        }
+        if rounds.is_multiple_of(25) {
+            kprintln!(
+                "  soak: {} rounds, {} processes, uptime {} ticks, frames/heap at baseline",
+                rounds,
+                processes,
+                interrupts::ticks()
+            );
+        }
+    }
+    kprintln!(
+        "  soak: {} s, {} rounds, {} processes ({} killed), {} kernel threads; frames {} and heap {} B unchanged",
+        seconds,
+        rounds,
+        processes,
+        rounds,
+        rounds * 4,
+        frames0,
+        heap0
+    );
+    ensure(WORK.load(Ordering::Relaxed) == rounds * 4 * (511 * 512 / 2), "kernel thread work lost")
+}

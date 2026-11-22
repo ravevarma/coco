@@ -45,6 +45,9 @@ pub enum State {
     Sleeping(u64),
     /// Finished; awaiting reaping.
     Dead,
+    /// A reaper is freeing the thread's resources; the record disappears
+    /// only once everything is released, so `join` cannot return early.
+    Reaping,
 }
 
 /// Scheduler errors.
@@ -56,6 +59,8 @@ pub enum SchedError {
     OutOfMemory,
     /// The scheduler has not been started.
     NotRunning,
+    /// `init` was called twice.
+    AlreadyRunning,
 }
 
 struct Thread {
@@ -132,6 +137,9 @@ unsafe extern "C" {
 /// # Errors
 /// [`SchedError::OutOfMemory`] if bookkeeping cannot be reserved.
 pub fn init() -> Result<(), SchedError> {
+    if RUNNING.load(Ordering::Acquire) || SCHED.lock().is_some() {
+        return Err(SchedError::AlreadyRunning);
+    }
     let mut threads = BTreeMap::new();
     let mut ready = VecDeque::new();
     let mut dead = Vec::new();
@@ -172,11 +180,10 @@ pub fn init() -> Result<(), SchedError> {
         default_fx,
     });
     cpu::set_kernel_stack(BOOT_STACK_TOP);
-    let idle = spawn_raw("idle", idle_main, 0, None)?;
+    // The idle thread is never queued: it runs only when nothing is ready.
+    let idle = spawn_raw("idle", idle_main, 0, None, false)?;
     if let Some(s) = SCHED.lock().as_mut() {
         s.idle = idle;
-        // The idle thread runs only when nothing else is ready.
-        s.ready.retain(|&t| t != idle);
     }
     RUNNING.store(true, Ordering::Release);
     Ok(())
@@ -200,6 +207,7 @@ fn spawn_raw(
     entry: extern "C" fn(u64) -> !,
     arg: u64,
     process: Option<(Pid, u64)>,
+    runnable: bool,
 ) -> Result<Tid, SchedError> {
     let mut fx = Box::new(FxArea::ZERO);
     let slot = {
@@ -247,7 +255,9 @@ fn spawn_raw(
         tid,
         Box::new(Thread { name, state: State::Ready, rsp, stack_top, slot: Some(slot), fx, process: pid, cr3 }),
     );
-    s.ready.push_back(tid); // capacity reserved: no allocation
+    if runnable {
+        s.ready.push_back(tid); // capacity reserved: no allocation
+    }
     Ok(tid)
 }
 
@@ -271,18 +281,42 @@ extern "C" fn kernel_thread_main(arg: u64) -> ! {
 pub fn spawn_kernel(name: &'static str, f: impl FnOnce() + Send + 'static) -> Result<Tid, SchedError> {
     let body: Box<Body> = Box::new(Box::new(f));
     let raw = Box::into_raw(body);
-    spawn_raw(name, kernel_thread_main, raw as u64, None).inspect_err(|_| {
+    spawn_raw(name, kernel_thread_main, raw as u64, None, true).inspect_err(|_| {
         // SAFETY: the thread was not created, so ownership is still ours.
         drop(unsafe { Box::from_raw(raw) });
     })
 }
 
-/// Spawns a thread belonging to process `pid` (address space `cr3`).
+/// Creates (but does not start) a thread belonging to process `pid`
+/// (address space `cr3`). The caller records the thread id and then calls
+/// [`start`], so no other code can observe the process before its thread is
+/// known.
 ///
 /// # Errors
 /// See [`SchedError`].
 pub fn spawn_user(name: &'static str, entry: extern "C" fn(u64) -> !, pid: Pid, cr3: u64) -> Result<Tid, SchedError> {
-    spawn_raw(name, entry, pid, Some((pid, cr3)))
+    spawn_raw(name, entry, pid, Some((pid, cr3)), false)
+}
+
+/// Makes a thread created by [`spawn_user`] runnable. Idempotent.
+pub fn start(tid: Tid) {
+    let mut g = SCHED.lock();
+    let Some(s) = g.as_mut() else { return };
+    if s.threads.get(&tid).is_some_and(|t| t.state == State::Ready) && !s.ready.contains(&tid) {
+        s.ready.push_back(tid); // capacity reserved: no allocation
+    }
+}
+
+/// Destroys a thread created by [`spawn_user`] that was never started.
+pub fn discard_unstarted(tid: Tid) {
+    let mut g = SCHED.lock();
+    let Some(s) = g.as_mut() else { return };
+    if s.threads.get(&tid).is_some_and(|t| t.state == State::Ready) && !s.ready.contains(&tid) {
+        if let Some(t) = s.threads.get_mut(&tid) {
+            t.state = State::Dead;
+        }
+        s.dead.push(tid);
+    }
 }
 
 /// Switches away from the current thread, leaving it in `mark`.
@@ -421,25 +455,37 @@ pub fn exit_current() -> ! {
 
 /// Frees the stacks and records of dead threads (never the current one).
 /// Must not be called from interrupt context.
+///
+/// Several threads may reap concurrently (the idle thread, `join` callers).
+/// Each dead thread is claimed by exactly one reaper (removed from the dead
+/// list and marked [`State::Reaping`] under `SCHED`); its record is removed
+/// and dropped inside one `SCHED` critical section after the stack is
+/// freed, so [`state`] reports the thread until every resource is released.
 pub fn reap() {
     loop {
-        let victim = {
+        let (tid, slot) = {
             let mut g = SCHED.lock();
             let Some(s) = g.as_mut() else { return };
             let current = s.current;
             let Some(pos) = s.dead.iter().position(|&t| t != current) else { return };
             let tid = s.dead.swap_remove(pos);
-            s.threads.remove(&tid)
+            let Some(t) = s.threads.get_mut(&tid) else { continue };
+            t.state = State::Reaping;
+            (tid, t.slot.take())
         };
-        let Some(thread) = victim else { continue };
-        if let Some(slot) = thread.slot {
+        if let Some(slot) = slot {
             let bottom = slot_base(slot) + PAGE_SIZE;
             mm::with(|m| m.unmap_and_free(bottom, KERNEL_THREAD_STACK_SIZE));
-            if let Some(s) = SCHED.lock().as_mut() {
-                s.free_slots.push(slot);
-            }
         }
-        drop(thread);
+        let mut g = SCHED.lock();
+        if let Some(s) = g.as_mut() {
+            if let Some(slot) = slot {
+                s.free_slots.push(slot); // capacity reserved: no allocation
+            }
+            // Dropped under SCHED (lock order SCHED -> HEAP allows it) so
+            // the record vanishes atomically with its memory.
+            drop(s.threads.remove(&tid));
+        }
     }
 }
 
@@ -477,4 +523,34 @@ pub fn join(tid: Tid) {
             sleep(1);
         }
     }
+}
+
+/// Diagnostic view of the scheduler.
+#[derive(Clone, Copy, Debug)]
+pub struct Snapshot {
+    /// Live thread records.
+    pub threads: usize,
+    /// Ready-queue length.
+    pub ready: usize,
+    /// Dead threads awaiting reaping.
+    pub dead: usize,
+    /// Running thread.
+    pub current: Tid,
+    /// Up to 8 live `(tid, name, state)` entries.
+    pub live: [(Tid, &'static str, State); 8],
+}
+
+/// Takes a diagnostic snapshot of the scheduler.
+pub fn snapshot() -> Snapshot {
+    let mut snap = Snapshot { threads: 0, ready: 0, dead: 0, current: 0, live: [(0, "", State::Dead); 8] };
+    let g = SCHED.lock();
+    let Some(s) = g.as_ref() else { return snap };
+    for (slot, (&tid, t)) in snap.live.iter_mut().zip(s.threads.iter()) {
+        *slot = (tid, t.name, t.state);
+    }
+    snap.threads = s.threads.len();
+    snap.ready = s.ready.len();
+    snap.dead = s.dead.len();
+    snap.current = s.current;
+    snap
 }

@@ -269,6 +269,10 @@ fn kernel_main(boot_info: u64) -> ! {
         }
         Some("shutdown") => record("shutdown", power::shutdown(acpi)),
         Some("threads") => record("threads", selftest::threads_suite()),
+        Some("soak") => {
+            let secs = cmd.get("secs").and_then(|s| s.parse::<u64>().ok()).unwrap_or(60).clamp(1, 86_400);
+            record("soak", selftest::soak(init_image, secs));
+        }
         Some("user") => record("user", selftest::user_suite(init_image)),
         Some("m3") => {
             record("threads", selftest::threads_suite());

@@ -5,7 +5,8 @@
 * IDT covers all 256 vectors: 32 exception stubs plus 224 IRQ stubs generated
   with an assembler `.rept`, laid out 16 bytes apart; `cpu::init` verifies
   the layout byte-by-byte before loading the IDT.
-* Legacy 8259 PICs are remapped to 0x20–0x2F and fully masked; their
+* Legacy 8259 PICs are remapped to 0x30–0x3F (clear of the APIC timer
+  vector 0x20) and fully masked; their
   spurious vectors are counted and ignored.
 * Local APIC: used in the mode the firmware left (xAPIC via an uncached
   MMIO mapping, or x2APIC via MSRs). `x2apic` on the command line requests

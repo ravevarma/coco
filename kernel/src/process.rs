@@ -74,20 +74,32 @@ pub fn spawn(image: &[u8], mode: u64, arg: u64) -> Result<Pid, SpawnError> {
         return Err(e);
     }
     let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
-    PROCESSES.lock().insert(pid, Process { root, thread: 0, entry: exe.entry(), mode, arg, status: Status::Running });
-    match sched::spawn_user("user", user_thread_main, pid, root) {
-        Ok(tid) => {
-            if let Some(p) = PROCESSES.lock().get_mut(&pid) {
-                p.thread = tid;
-            }
-            Ok(pid)
-        }
+    // The thread is created stopped, registered with its process, and only
+    // then started: no code can observe a process whose thread is unknown.
+    let tid = match sched::spawn_user("user", user_thread_main, pid, root) {
+        Ok(tid) => tid,
         Err(e) => {
-            PROCESSES.lock().remove(&pid);
             mm::with(|m| m.teardown_user(root));
-            Err(SpawnError::Sched(e))
+            return Err(SpawnError::Sched(e));
         }
+    };
+    let inserted = {
+        let mut procs = PROCESSES.lock();
+        // Pids are never reused; this guards the invariant.
+        let fresh = !procs.contains_key(&pid);
+        if fresh {
+            procs.insert(pid, Process { root, thread: tid, entry: exe.entry(), mode, arg, status: Status::Running });
+        }
+        fresh
+    };
+    if !inserted {
+        sched::discard_unstarted(tid);
+        sched::reap();
+        mm::with(|m| m.teardown_user(root));
+        return Err(SpawnError::OutOfMemory);
     }
+    sched::start(tid);
+    Ok(pid)
 }
 
 fn build_address_space(root: u64, exe: &Executable<'_>) -> Result<(), SpawnError> {
