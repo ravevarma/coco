@@ -57,13 +57,22 @@ fn rustflags(root: &Path, flavor: Flavor) -> String {
         Flavor::User => flags.extend(["-C", "relocation-model=static"].map(String::from)),
         Flavor::Uefi => {}
     }
-    flags.push(format!("--remap-path-prefix={}=/coco", root.display()));
-    flags.push(format!("--remap-path-prefix={}=/cargo", home_dir("CARGO_HOME", ".cargo")));
-    flags.push(format!("--remap-path-prefix={}=/rustup", home_dir("RUSTUP_HOME", ".rustup")));
+    flags.extend(remap_flags(root));
     flags.join("\u{1f}")
 }
 
-fn cargo(root: &Path) -> Command {
+/// Path-remapping flags so artifacts do not depend on the checkout location
+/// or home directory.
+pub fn remap_flags(root: &Path) -> [String; 3] {
+    [
+        format!("--remap-path-prefix={}=/coco", root.display()),
+        format!("--remap-path-prefix={}=/cargo", home_dir("CARGO_HOME", ".cargo")),
+        format!("--remap-path-prefix={}=/rustup", home_dir("RUSTUP_HOME", ".rustup")),
+    ]
+}
+
+/// A cargo command in `root` that does not inherit flags from the caller.
+pub fn cargo(root: &Path) -> Command {
     let mut c = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     c.current_dir(root);
     // Never inherit flags from the outer cargo invocation.
@@ -235,6 +244,30 @@ pub fn check(root: &Path) -> Res<()> {
         ("unit + property tests (host, release)", vec!["test", "--locked", "--release"], vec![]),
         ("rustdoc (host crates)", vec!["doc", "--locked", "--no-deps"], vec![("RUSTDOCFLAGS", "-D warnings")]),
     ];
+    // Clippy for the portable kernel on each architecture.
+    type OwnedStep = (String, Vec<String>, Vec<(String, String)>);
+    let port_steps: Vec<OwnedStep> = crate::ports::PORTS
+        .iter()
+        .map(|p| {
+            let args =
+                ["clippy", "--locked", "-p", "coco-port", "--target", p.target, "--release", "--", "-D", "warnings"];
+            (
+                format!("clippy (coco-port, {})", p.target),
+                args.map(String::from).to_vec(),
+                vec![("CARGO_ENCODED_RUSTFLAGS".to_string(), crate::ports::port_rustflags(root, p))],
+            )
+        })
+        .collect();
+    let steps = steps
+        .into_iter()
+        .map(|(n, a, e)| {
+            (
+                n.to_string(),
+                a.into_iter().map(String::from).collect::<Vec<_>>(),
+                e.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>(),
+            )
+        })
+        .chain(port_steps);
     let mut failed = Vec::new();
     for (name, args, env) in steps {
         println!("==> {name}");
@@ -272,6 +305,10 @@ pub fn reproducibility(root: &Path) -> Res<()> {
         let mut h = Vec::new();
         for p in [&out.loader, &out.kernel, &out.esp_img, &out.disk_img] {
             h.push((p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), sha256(p)?));
+        }
+        for port in crate::ports::PORTS {
+            let elf = crate::ports::build_release(&copy, port)?;
+            h.push((format!("port-{}", port.name), sha256(&elf)?));
         }
         hashes.push(h);
     }

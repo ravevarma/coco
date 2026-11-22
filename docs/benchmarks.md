@@ -8,13 +8,13 @@ Since M2 the TSC is calibrated against the ACPI PM timer (measured
 
 ## Binary and image size
 
-| Artifact | M1 (`0c9c263`) | M2 (`b60418a`) | M3 (`c89325a`) | M4 (`99e8620`) |
-|---|---:|---:|---:|---:|
-| `BOOTX64.EFI` (loader) | 31,232 | 31,232 | 32,256 | 32,256 |
-| `kernel.elf` | 41,664 | 90,992 | 132,160 | 160,872 |
-| `init.elf` (first user program) | — | — | 12,648 | 16,760 |
-| Installed base (cluster-rounded) | 75,264 | 124,416 | 179,712 | **212,480** of 108,000,000 |
-| Kernel image in memory (text + rodata + data/bss) | 88 KiB | 156 KiB | 196 KiB |
+| Artifact | M1 (`0c9c263`) | M2 (`b60418a`) | M3 (`c89325a`) | M4 (`99e8620`) | post-M4 audit + ports |
+|---|---:|---:|---:|---:|---:|
+| `BOOTX64.EFI` (loader) | 31,232 | 31,232 | 32,256 | 32,256 | 32,256 |
+| `kernel.elf` | 41,664 | 90,992 | 132,160 | 160,872 | 160,872 (audit fixes and `test=bench` +4,096; fallible cycle check without `BTreeSet` −4,096) |
+| `init.elf` (first user program) | — | — | 12,648 | 16,760 | 16,760 |
+| Installed base (cluster-rounded) | 75,264 | 124,416 | 179,712 | 212,480 | **212,480** of 108,000,000 |
+| Kernel image in memory (text + rodata + data/bss) | 88 KiB | 156 KiB | 196 KiB | — | — |
 
 The M2 growth comes from the heap and `alloc` collections, ACPI parsing,
 APIC/timer code and the in-kernel self-tests (which ship in the same
@@ -102,6 +102,44 @@ interrupts. Calibrated rates: TSC 2,102–2,108 MHz, APIC timer
 | M1: `cli; hlt` (no interrupts) | 0.3% |
 | M2: `sti; hlt` with 100 Hz APIC tick | 1.3% |
 | M3: scheduler + idle thread, 100 Hz tick | 1.2% |
+
+## Syscall, yield and IPC cost (post-M4 audit, `test=bench`, TCG)
+
+One quiet-host run of the `bench-ipc` case (other runs during the audit
+varied by up to ±40%: the host is shared and TCG is sensitive to it).
+
+| Measurement | Value |
+|---|---:|
+| Null syscall (`GET_PID` round trip, SYSCALL/SYSRET + swapgs) | 592 cycles (336 in another run) |
+| Process yield (two processes yielding to each other; one figure covers both turns and two CR3 switches) | 36,501 / 36,678 cycles |
+| Echo IPC round trip | 104,058 / 93,527 cycles (two rounds) |
+
+Finding: the kernel's own paths are small (syscall ≈0.6 k cycles, kernel
+thread switch ≈4.2 k); the process-to-process cost is dominated by
+address-space switches, which flush the whole software TLB under TCG.
+PCID and global kernel pages would remove most of that on hardware, but
+TCG cannot measure the benefit, so they are recorded as a hardware
+measurement item rather than claimed. A combined send+wait syscall
+(`CHANNEL_CALL`) was implemented and measured: no reproducible gain
+(round trips 59–75 k cycles with it vs 72–76 k without, overlapping),
+so it was **removed** to keep the ABI small.
+
+## Portable bring-up kernel (QEMU TCG, `cargo xtask port-test`)
+
+| Port | ELF file (B) | text + data + bss (B) | 20 ticks at 100 Hz, by independent counter | Frames exhausted and recovered |
+|---|---:|---:|---:|---:|
+| RISC-V 64 | 33,376 | 26,900 | 203–205 ms (`rdtime`) | 32,356 (126 MiB) |
+| RISC-V 32 | 37,256 | 28,482 | 204–205 ms (CLINT `mtime`) | 32,451 (126 MiB) |
+| AArch64 | 41,568 | 32,128 | 204–207 ms (`cntvct`) | 32,212 (125 MiB) |
+| x86 32-bit | 33,176 | 26,760 | 199–200 ms (TSC, PIT-calibrated) | 32,198 (125 MiB) |
+
+Each image contains the full self-test suite, the frame allocator, heap,
+capability and IPC code, and a formatting console.
+
+Size experiment: lld aligns AArch64 segments to 64 KiB by default; linking
+with `-z max-page-size=4096` (all ports use 4 KiB pages) shrank the AArch64
+file from **103,008 to 41,568 bytes (−60%)**. The other targets already
+used 4 KiB and are unchanged.
 
 ## Not yet measurable
 

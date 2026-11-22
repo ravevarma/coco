@@ -291,7 +291,7 @@ extern "C" fn coco_port_aarch64_main(x0: usize) -> ! {
 /// # Safety
 /// `addr` must be a readable physical address (RAM).
 unsafe fn dtb_slice(addr: usize) -> Option<&'static [u8]> {
-    if addr < RAM_START || addr % 8 != 0 {
+    if addr < RAM_START || !addr.is_multiple_of(8) {
         return None;
     }
     // SAFETY: caller contract; magic and size are read before anything else.

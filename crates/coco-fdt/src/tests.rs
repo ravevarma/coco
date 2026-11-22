@@ -18,7 +18,7 @@ impl Writer {
         self.structure.extend_from_slice(&v.to_be_bytes());
     }
     fn pad(&mut self) {
-        while self.structure.len() % 4 != 0 {
+        while !self.structure.len().is_multiple_of(4) {
             self.structure.push(0);
         }
     }
@@ -218,6 +218,30 @@ fn mutation_never_panics() {
         }
         if let Ok(s) = parse(&b, b"ns16550a") {
             assert!(s.memory.as_slice().len() <= MAX_RANGES && s.reserved.as_slice().len() <= MAX_RANGES);
+        }
+    }
+}
+
+/// Real device trees dumped from QEMU 8.2 (`-machine virt,dumpdtb=…`, 128 MiB,
+/// one CPU; the AArch64 one compacted with `dtc`, which QEMU pads to 1 MiB).
+const QEMU_RISCV64: &[u8] = include_bytes!("../testdata/qemu-riscv64-virt.dtb");
+const QEMU_RISCV32: &[u8] = include_bytes!("../testdata/qemu-riscv32-virt.dtb");
+const QEMU_AARCH64: &[u8] = include_bytes!("../testdata/qemu-aarch64-virt.dtb");
+
+#[test]
+fn parses_real_qemu_device_trees() {
+    for (blob, compatible, ram, device) in [
+        (QEMU_RISCV64, &b"ns16550a"[..], 0x8000_0000, 0x1000_0000),
+        (QEMU_RISCV32, b"ns16550a", 0x8000_0000, 0x1000_0000),
+        (QEMU_AARCH64, b"arm,pl011", 0x4000_0000, 0x0900_0000),
+    ] {
+        let s = parse(blob, compatible).unwrap();
+        assert_eq!(s.memory.as_slice(), &[Range { base: ram, size: 128 << 20 }]);
+        assert_eq!(s.device, Some(device));
+        assert_eq!(s.total_size as usize, blob.len());
+        // Every proper prefix is rejected, never misparsed.
+        for cut in [0, 1, 39, 40, blob.len() / 2, blob.len() - 1] {
+            assert!(parse(&blob[..cut], compatible).is_err());
         }
     }
 }

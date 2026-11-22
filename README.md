@@ -2,9 +2,11 @@
 
 **Compact · Composable · Secure · Fast · Intuitive**
 
-coco is an independent operating system for x86_64 UEFI machines, written
-from scratch in Rust: its own UEFI loader, its own kernel, its own boot
-protocol — no Linux, BSD, XNU, Windows or Redox underneath.
+coco is an independent operating system written from scratch in Rust: its
+own UEFI loader, its own kernel, its own boot protocol — no Linux, BSD,
+XNU, Windows or Redox underneath. The full kernel targets x86_64 UEFI
+machines; a portable bring-up kernel already boots on **RISC-V 64,
+RISC-V 32, AArch64 and 32-bit x86** (see [ADR 0015](docs/adr/0015-multi-architecture-ports.md)).
 
 > **Status: M0–M4 complete — EXPERIMENTAL, NOT RELEASE READY.**
 > coco boots in QEMU/OVMF and runs its first user program as pid 1. It has
@@ -14,6 +16,9 @@ protocol — no Linux, BSD, XNU, Windows or Redox underneath.
 > with a first user-space service, and ACPI reboot/power-off. It has no
 > filesystem, drivers or applications yet and has never run on physical
 > hardware.
+> The RISC-V, AArch64 and 32-bit x86 ports run the shared frame allocator,
+> heap, capabilities and IPC with traps and timer interrupts, but with the
+> MMU off and no user mode yet.
 > See [docs/quality-report.md](docs/quality-report.md).
 
 ![coco boot screen in QEMU](docs/images/boot-splash.png)
@@ -33,6 +38,8 @@ protocol — no Linux, BSD, XNU, Windows or Redox underneath.
 | Memory | `crates/coco-memory/` | bitmap frame allocator, 4-level page-table mapper, hardened heap |
 | Sync | `crates/coco-sync/` | spin lock, Loom-checked |
 | Arch | `arch/x86_64/` | privileged instructions, descriptors, 16550 UART |
+| Portable bring-up kernel | `ports/coco-port/` | RISC-V 64 (S-mode/OpenSBI), RISC-V 32 (M-mode), AArch64 (EL1, GICv2), x86 32-bit (Multiboot): traps, timer, frames, heap, capabilities, IPC |
+| Device tree | `crates/coco-fdt/` | flattened device-tree reader, no allocation, no `unsafe`, fuzzed |
 | Tooling | `tools/xtask/` | build, GPT/FAT image, size gate, QEMU test matrix, reproducibility check |
 
 Base image today: **212,480 bytes** of the 108,000,000-byte budget
@@ -44,6 +51,8 @@ Base image today: **212,480 bytes** of the 108,000,000-byte budget
 cargo xtask build        # loader + kernel + disk image + size report
 cargo xtask qemu-test    # boot test matrix under QEMU/OVMF
 cargo xtask run          # interactive boot, serial on stdio
+cargo xtask port-test    # boot the RISC-V 64/32, AArch64 and x86 ports
+cargo xtask cross-test   # portable crates' tests on 32-bit x86, AArch64, RISC-V 64
 ```
 
 Requirements and every other command: [docs/building.md](docs/building.md).

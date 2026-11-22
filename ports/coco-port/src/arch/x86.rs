@@ -461,9 +461,14 @@ pub unsafe extern "C" fn memset(dst: *mut u8, c: i32, n: usize) -> *mut u8 {
 /// Standard C `memcmp` contract: valid regions of `n` bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn memcmp(a: *const u8, b: *const u8, n: usize) -> i32 {
-    for i in 0..n {
-        // SAFETY: caller contract; `i < n`.
-        let (x, y) = unsafe { (a.add(i).read(), b.add(i).read()) };
+    if n == 0 {
+        return 0;
+    }
+    // SAFETY: caller contract: both regions are valid for `n` bytes.
+    let a = unsafe { core::slice::from_raw_parts(a, n) };
+    // SAFETY: as above.
+    let b = unsafe { core::slice::from_raw_parts(b, n) };
+    for (&x, &y) in a.iter().zip(b) {
         if x != y {
             return i32::from(x) - i32::from(y);
         }

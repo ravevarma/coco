@@ -563,6 +563,13 @@ extern "C" fn coco_port_riscv_trap(frame: &mut [usize; 32]) {
 #[unsafe(no_mangle)]
 extern "C" fn coco_port_riscv_main(_hart: usize, dtb: usize) -> ! {
     csr!(write "tvec", (&raw const coco_port_trap_entry) as usize);
+    // Keep the FPU off (status.FS = Off): the trap handler does not save FP
+    // registers, so any FP instruction must trap visibly instead.
+    #[cfg(target_arch = "riscv64")]
+    // SAFETY: clearing sstatus.FS only disables FP instructions.
+    unsafe {
+        core::arch::asm!("csrc sstatus, {}", in(reg) 3usize << 13, options(nomem, nostack));
+    }
     let mut platform = Platform::new("device tree");
     // SAFETY: firmware/QEMU passes the device-tree address in a1. Only the
     // fixed header is read before the declared size is checked by the
@@ -596,7 +603,7 @@ extern "C" fn coco_port_riscv_main(_hart: usize, dtb: usize) -> ! {
 /// # Safety
 /// `addr` must be a readable physical address holding an FDT header.
 unsafe fn dtb_slice(addr: usize) -> Option<&'static [u8]> {
-    if addr == 0 || addr % 4 != 0 {
+    if addr == 0 || !addr.is_multiple_of(4) {
         return None;
     }
     // SAFETY: caller contract; the magic and size fields are read first.

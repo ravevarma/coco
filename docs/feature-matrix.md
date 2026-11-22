@@ -39,6 +39,14 @@ Legend: ✅ implemented and tested · 🟡 partial · ⬜ not started.
 | M4 | Reference-cycle refusal; iterative release of chains | ✅ | `ipc-capabilities` (0 live channels after 2 rounds) |
 | M4 | First user-space service (echo) | ✅ | 1,000 verified round trips |
 | M4 | Name/service registry, shared memory objects, process spawning from user space | ⬜ | next |
+| Ports | Portable core crates tested on 32-bit x86, AArch64, RISC-V 64; built for 6 bare-metal targets | ✅ | `cargo xtask cross-test` (82 tests per architecture) |
+| Ports | RISC-V 64 (S-mode, OpenSBI): boot, traps, SBI timer, DT memory map, frames, heap, caps + IPC | ✅ | `cargo xtask port-test` incl. 2 negative cases |
+| Ports | RISC-V 32 (M-mode, no firmware): same feature set, CLINT timer | ✅ | `port-test` |
+| Ports | AArch64 (EL1): same feature set, GICv2 + generic timer, PSCI power-off | ✅ | `port-test` |
+| Ports | x86 32-bit (Multiboot): same feature set, PIC + PIT, TSC calibration, SSE-safe traps | ✅ | `port-test` |
+| Ports | Device-tree parsing (`coco-fdt`) | ✅ | host tests on real QEMU blobs, Miri, 50.8 M fuzz runs |
+| Ports | Paging/MMU, user mode, scheduler, SMP on non-x86_64 ports | ⬜ | next port milestones |
+| Ports | x86_64 full kernel on 32-bit x86 (PAE paging, processes) | ⬜ | |
 | M5 | Storage, input, networking drivers | ⬜ | |
 | M6 | Compositor, desktop, CocoKit | ⬜ | only a boot splash exists |
 | M7 | Files, Settings, Search, app runtime | ⬜ | |

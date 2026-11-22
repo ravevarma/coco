@@ -19,7 +19,11 @@ fn main() {
         println!("cargo:rustc-link-arg-bins=-nostdlib");
         println!("cargo:rustc-link-arg-bins=-static");
         println!("cargo:rustc-link-arg-bins=-Wl,--build-id=none");
+        println!("cargo:rustc-link-arg-bins=-Wl,-z,max-page-size=4096");
     } else {
         println!("cargo:rustc-link-arg-bins=--build-id=none");
+        // Every port uses 4 KiB pages; lld's AArch64 default (64 KiB) pads
+        // the file by ~70 KB.
+        println!("cargo:rustc-link-arg-bins=-zmax-page-size=4096");
     }
 }

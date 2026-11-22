@@ -161,24 +161,30 @@ static GRAPH: IrqSpinLock<()> = IrqSpinLock::new(());
 const REACH_BUDGET: usize = 4096;
 
 /// True if channel `from` can reach channel `target` through endpoints in
-/// flight (iterative depth-first search with a fixed work budget).
+/// flight: depth-first search with a fixed work budget.
+///
+/// No visited set is kept: the in-flight graph is acyclic (invariant I3),
+/// so the search terminates, and the budget bounds it even if shared
+/// sub-graphs are walked more than once. Every allocation is fallible, so
+/// heap exhaustion refuses the send (`NoResources`) instead of panicking
+/// with interrupts disabled. Arcs on the stack are dropped after the
+/// channel lock guard (reverse declaration order).
 fn reaches(from: &Arc<Shared>, target: &Arc<Shared>) -> Result<bool, Error> {
     let mut budget = REACH_BUDGET;
     let mut stack: Vec<Arc<Shared>> = Vec::new();
-    let mut visited = alloc::collections::BTreeSet::new();
     stack.try_reserve(8).map_err(|_| Error::NoResources)?;
     stack.push(Arc::clone(from));
     while let Some(c) = stack.pop() {
         if Arc::ptr_eq(&c, target) {
             return Ok(true);
         }
-        if !visited.insert(Arc::as_ptr(&c) as usize) {
-            continue;
+        budget = budget.checked_sub(1).ok_or(Error::NoResources)?;
+        let state = c.state.lock();
+        for t in state.in_flight() {
+            budget = budget.checked_sub(1).ok_or(Error::NoResources)?;
+            stack.try_reserve(1).map_err(|_| Error::NoResources)?;
+            stack.push(Arc::clone(&t.object.channel().shared));
         }
-        let next: Vec<Arc<Shared>> =
-            c.state.lock().in_flight().map(|t| Arc::clone(&t.object.channel().shared)).collect();
-        budget = budget.checked_sub(next.len().max(1)).ok_or(Error::NoResources)?;
-        stack.extend(next);
     }
     Ok(false)
 }

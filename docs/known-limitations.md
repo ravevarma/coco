@@ -1,4 +1,4 @@
-# Known limitations (M0/M1)
+# Known limitations
 
 * **QEMU only.** Nothing has run on physical hardware. Laptops commonly lack
   COM1; coco then runs framebuffer-only (handled, but untested on hardware).
@@ -53,3 +53,22 @@
   pinned stable toolchain used for shipped artifacts.
 * **No dependency-advisory scan tool** is wired in; the shipped binaries have
   no third-party dependencies, which is the current mitigation.
+
+## Other architectures (ADR 0015)
+* **Bring-up only.** RISC-V 64/32, AArch64 and 32-bit x86 run the portable
+  kernel with the **MMU off** (physical = virtual, no W^X enforcement, no
+  isolation): no paging, user mode, processes, scheduler or syscalls yet.
+* **RISC-V 32 runs in M-mode** without firmware; no RV32 SBI firmware is
+  available in this build environment.
+* **Single core** on every port: secondary harts/cores are parked (AArch64)
+  or never started.
+* **QEMU `virt`/`pc` only**: device addresses fall back to QEMU's when the
+  device tree lacks the UART; the GIC and CLINT addresses are fixed to
+  QEMU's layout (not read from the device tree yet).
+* **AArch64 failures exit QEMU with status 0** (PSCI reset under
+  `-no-reboot`); the harness detects them from the serial log.
+* **32-bit x86 uses the hosted `i686-unknown-linux-gnu` target**
+  freestanding, with its own `mem*` routines; physical memory above 4 GiB
+  is ignored (no PAE yet).
+* **At most 16 RAM and 16 reserved ranges** are taken from a device tree
+  (extra ones are counted and dropped).

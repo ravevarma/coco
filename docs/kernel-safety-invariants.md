@@ -130,6 +130,10 @@ rely on.
 * **I3 — Acyclic in-flight graph.** A send carrying endpoints is checked and
   enqueued under `GRAPH`; it is refused if the endpoint's channel already
   reaches the destination channel. Hence no channel can keep itself alive.
+  The reachability search runs with interrupts disabled, so it has a fixed
+  budget (`REACH_BUDGET` = 4,096 node + edge examinations) and only
+  fallible allocations: if the answer cannot be computed, the send is
+  refused with `NoResources` — a cycle is never admitted.
 * **I4 — Process exit.** A finished or killed process's handle table is
   drained before its thread switches away; objects are dropped outside
   `PROCESSES`.
@@ -150,3 +154,29 @@ rely on.
   allocated with its own memory types.
 * **F3** — Memory descriptors are read with `read_unaligned` at the
   firmware-reported stride (`desc_size >= 40` is checked).
+
+## Portable bring-up kernel (`ports/coco-port`, ADR 0015)
+
+* **R1 — Physical = virtual.** The MMU is off, so every pointer is a
+  physical address. Raw memory is touched only in (a) firmware-reported
+  usable RAM minus the kernel image, the device tree / Multiboot
+  structures and firmware reservations (`usable_ranges`), (b) device
+  registers of the platform (UART, GIC, CLINT, test/exit devices, legacy
+  x86 ports). The bitmaps and the 1 MiB heap are carved out of (a) and
+  never handed to the frame allocator.
+* **R2 — Boot blobs.** Device trees are trusted only after the magic and a
+  bounded declared size (40 B – 2 MiB) are checked; all further parsing is
+  safe code in `coco-fdt`. Multiboot memory-map walking stops on an entry
+  size below 20 or on overflow.
+* **R3 — Traps.** Every vector saves all general registers the compiled
+  code may use: 31 GPRs + PC on RISC-V and AArch64; `pushal` plus FXSAVE
+  of SSE state on 32-bit x86. The FPU is off on RISC-V 64 and absent from
+  the AArch64 soft-float and RV32IMAC targets, so no unsaved FP state
+  exists. Handlers never allocate; the heap lock is therefore never
+  re-entered from a trap.
+* **R4 — Unexpected traps are fatal.** Anything other than the breakpoint
+  and timer (and spurious PIC IRQs) prints a diagnostic and stops the
+  machine; nothing resumes after an unknown fault (negative test
+  `inject-fault` on every port).
+* **R5 — 32-bit pointers.** RAM above the addressable limit (4 GiB on 32-bit
+  CPUs) is clamped away, never truncated into a low address.

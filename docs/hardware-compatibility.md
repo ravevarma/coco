@@ -28,6 +28,22 @@ has been run on real hardware.
 | Soft off | ACPI S5 via PM1a (`_S5` = 0/0 on q35) | kernel | ✅ QEMU exits 0 | `shutdown`, `lifecycle-3-boots` |
 | CMOS | RTC/CMOS bytes 0x7E–0x7F (test boot counter only) | kernel | ✅ survives reset | `lifecycle-3-boots` |
 
+## Other architectures (portable bring-up kernel, QEMU 8.2.2 TCG)
+
+All four boot under `cargo xtask port-test` with `-smp 1 -m 128M`. Only the
+bring-up feature set runs (MMU off); see ADR 0015.
+
+| Architecture | QEMU machine | Firmware | Interrupt controller / timer | Console | Exit | Status |
+|---|---|---|---|---|---|---|
+| RISC-V 64 | `virt` | OpenSBI (QEMU-bundled, `-bios default`) | SBI TIME extension (S-mode timer), `rdtime` 10 MHz | ns16550a (from device tree) | `sifive,test` | ✅ |
+| RISC-V 32 | `virt` | none (`-bios none`, M-mode) | CLINT `mtime`/`mtimecmp` 10 MHz | ns16550a | `sifive,test` | ✅ |
+| AArch64 | `virt,gic-version=2`, `cortex-a53` | none (direct ELF boot at EL1) | GICv2, EL1 physical timer (PPI 30), `cntfrq` | PL011 (from device tree) | PSCI over HVC | ✅ |
+| x86 32-bit | `pc` (i440FX) | SeaBIOS + QEMU Multiboot loader | 8259 PIC + PIT 100 Hz; TSC calibrated on PIT ch. 2 | COM1 16550 | `isa-debug-exit` | ✅ |
+
+Not tested: GICv3, multiple harts/cores (secondary cores are parked or
+never started), real boards (no SiFive, Raspberry Pi or other hardware),
+GRUB as the Multiboot loader, RV32 S-mode.
+
 ## Not supported yet (planned milestone)
 
 | Area | Milestone |

@@ -14,6 +14,7 @@ coco-abi = { path = "../crates/coco-abi" }
 coco-acpi = { path = "../crates/coco-acpi" }
 coco-capability = { path = "../crates/coco-capability" }
 coco-ipc = { path = "../crates/coco-ipc" }
+coco-fdt = { path = "../crates/coco-fdt" }
 
 [[bin]]
 name = "elf_parse"
@@ -53,6 +54,13 @@ bench = false
 [[bin]]
 name = "ipc_channel"
 path = "fuzz_targets/ipc_channel.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fdt_parse"
+path = "fuzz_targets/fdt_parse.rs"
 test = false
 doc = false
 bench = false

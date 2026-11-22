@@ -6,10 +6,13 @@
 //! cargo xtask qemu-test [filter]   boot test matrix under QEMU/OVMF
 //! cargo xtask run [--cmdline S] [--memory M] [--smp N]   interactive boot (serial on stdio)
 //! cargo xtask repro                build twice from separate copies, compare hashes
+//! cargo xtask port-test [filter]   boot the RISC-V 64/32, AArch64 and x86 ports under QEMU
+//! cargo xtask cross-test           portable-crate tests on i686/AArch64/RISC-V 64, bare-metal builds
 //! ```
 
 mod artifacts;
 mod gpt;
+mod ports;
 mod qemu;
 mod size;
 
@@ -72,8 +75,10 @@ fn real_main() -> Res<()> {
             qemu::interactive(&out, &cmdline, &memory, &smp)
         }
         Some("repro") => artifacts::reproducibility(&root),
+        Some("port-test") => ports::port_test(&root, args.get(1).map(String::as_str)),
+        Some("cross-test") => ports::cross_test(&root),
         _ => {
-            Err("usage: cargo xtask <build [--debug] | check | qemu-test [filter] | run [--cmdline S] | repro>".into())
+            Err("usage: cargo xtask <build [--debug] | check | qemu-test [filter] | run [--cmdline S] | repro | port-test [filter] | cross-test>".into())
         }
     }
 }

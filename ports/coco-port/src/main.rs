@@ -336,7 +336,7 @@ fn test_frames(usable: &[Range]) -> Option<(FrameAllocator<'static>, Range)> {
             && intact
             && fa.check_invariants()
             && fa.allocate().map(|f| fa.free(f)).is_ok(),
-        format_args!("{} frames ({} MiB) allocated with pattern writes and recovered", count, count * PAGE >> 20),
+        format_args!("{} frames ({} MiB) allocated with pattern writes and recovered", count, (count * PAGE) >> 20),
     );
     let _ = FrameError::OutOfMemory;
     Some((fa, heap))

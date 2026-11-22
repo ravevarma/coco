@@ -8,6 +8,13 @@
   OVMF (`/usr/share/OVMF/OVMF_CODE_4M.fd`, `OVMF_VARS_4M.fd`; tested edk2
   2024.02), coreutils `sha256sum`.
   On Ubuntu 24.04: `apt-get install qemu-system-x86 ovmf mtools`.
+* Ports and cross-architecture tests: `qemu-system-misc` (RISC-V),
+  `qemu-system-arm` (AArch64), `qemu-system-x86` (i386), `qemu-user`
+  (`qemu-aarch64`, `qemu-riscv64`); Rust targets `aarch64-unknown-linux-musl`
+  and `riscv64gc-unknown-linux-musl` for `cross-test`
+  (`rustup target add …`); the other port targets come from
+  `rust-toolchain.toml`. The 32-bit x86 port links with the host `cc` and
+  `rust-lld`.
 * Optional: nightly Rust with Miri (`rustup toolchain install nightly
   --component miri`) and `cargo install cargo-fuzz`.
 
@@ -15,13 +22,15 @@
 | Command | What it does |
 |---|---|
 | `cargo xtask build` | release loader + kernel, `target/coco/esp/`, `esp.img`, GPT `coco.img`, size report (fails above 108,000,000 bytes) |
-| `cargo xtask check` | rustfmt, clippy `-D warnings` (host + both bare-metal targets), tests (debug + release), rustdoc |
+| `cargo xtask check` | rustfmt, clippy `-D warnings` (host, x86_64 bare-metal targets, and `coco-port` for all four port targets), tests (debug + release), rustdoc |
 | `cargo xtask qemu-test [filter]` | QEMU/OVMF boot matrix; logs in `target/coco/qemu/<case>/` |
 | `cargo xtask run [--cmdline "test=memory"] [--memory 512M] [--smp 2]` | interactive boot, serial on stdio |
+| `cargo xtask port-test [filter]` | builds `ports/coco-port` for RISC-V 64/32, AArch64 and x86 (32-bit), boots each in QEMU, plus two negative cases per port; results in `target/coco/port-results.md`, logs in `target/coco/ports/` |
+| `cargo xtask cross-test` | portable crates' unit tests on i686 (native), AArch64 and RISC-V 64 (QEMU user mode); release builds for six bare-metal targets |
 | `cargo xtask repro` | builds from two copies of the tree at different paths and compares SHA-256 of every artifact |
-| `rustup run nightly cargo miri test -p coco-abi -p coco-acpi -p coco-elf -p coco-memory -p coco-sync -p coco-arch-x86_64` | Miri |
+| `rustup run nightly cargo miri test -p coco-abi -p coco-acpi -p coco-capability -p coco-elf -p coco-fdt -p coco-ipc -p coco-memory -p coco-sync -p coco-arch-x86_64` | Miri |
 | `RUSTFLAGS="--cfg loom" cargo test -p coco-sync --release --target-dir target/loom` | Loom |
-| `cd fuzz && cargo +nightly fuzz run elf_parse -- -max_total_time=300` | fuzzing (`elf_parse`, `memory_map`, `boot_info`, `acpi_tables`) |
+| `cd fuzz && cargo +nightly fuzz run elf_parse -- -max_total_time=300` | fuzzing (`elf_parse`, `memory_map`, `boot_info`, `acpi_tables`, `capabilities`, `ipc_channel`, `fdt_parse` — seed the last with `crates/coco-fdt/testdata`) |
 
 ## Kernel command line (`\coco\cmdline.txt` on the ESP)
 * `test=memory` — frame allocator, paging, protection policy, heap churn,
