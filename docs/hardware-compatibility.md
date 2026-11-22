@@ -17,7 +17,7 @@ has been run on real hardware.
 | Display | GOP linear framebuffer 1280×800, BGRX | kernel `fb` | ✅ pixel-verified | `boot-default` screendump check |
 | Serial | 16550 UART at COM1 (0x3F8), 115200 8N1 | `coco_arch::serial` | ✅ | all cases |
 | Debug exit | `isa-debug-exit` at 0xF4 (QEMU only, opt-in `qemu-exit`) | kernel | ✅ | all exit-code cases |
-| CPU model | `-cpu qemu64` (no SMEP/SMAP/UMIP) | arch | ✅ features detected as absent | `selftest-cpu-qemu64` |
+| CPU model | `-cpu qemu64` (no SMEP/SMAP/UMIP) | arch | ✅ features detected as absent; user mode works with the non-STAC copy path | `selftest-cpu-qemu64`, `user-isolation-no-smap` |
 | ACPI | RSDP 2.0, XSDT, MADT, FADT, HPET, DSDT `_S5` (QEMU q35 "BOCHS" tables) | `coco-acpi` | ✅ | `boot-default`, `acpi-smp4` |
 | Legacy PIC | 8259 pair | kernel | ✅ remapped + masked | all M2 cases |
 | Local APIC | xAPIC (MMIO 0xFEE00000), timer periodic 100 Hz | kernel | ✅ | `timer` (1,001 ms per 100 ticks) |

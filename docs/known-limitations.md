@@ -14,6 +14,10 @@
   limited.
 * **~1 MiB of RAM** is spent pre-populating all 256 kernel PML4 slots so
   process address spaces share kernel mappings.
+* **No KPTI / speculative-execution mitigations.** The kernel half is
+  mapped (supervisor-only) in every process. On CPUs affected by Meltdown
+  a user program could read kernel memory speculatively; Spectre-class
+  mitigations are not implemented either.
 * **AVX and FSGSBASE are disabled** for user programs (only x87/SSE state
   is saved per thread).
 * **Heap memory is never returned** to the frame allocator, and small-class

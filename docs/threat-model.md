@@ -44,6 +44,7 @@ future user data, and availability of the boot path.
 | User code disabling SMAP for the kernel (RFLAGS.AC) | FMASK clears AC on syscall entry | code review |
 
 ## Not yet addressed (by design of the milestone order)
-Capabilities and least-privilege permissions (M4), IOMMU/DMA isolation,
+Speculative-execution attacks (Meltdown: no KPTI; Spectre: no
+mitigations), capabilities and least-privilege permissions (M4), IOMMU/DMA isolation,
 KASLR, stack canaries, secure randomness, resource quotas per process,
 signed updates and rollback protection. None of these are claimed.

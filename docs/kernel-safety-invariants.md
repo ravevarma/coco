@@ -100,8 +100,12 @@ rely on.
 
 ## Threads, processes and user memory
 
-* **T1 — Stacks.** Each thread stack is owned by exactly one thread record
-  and freed only by `reap`, which never reaps the running thread.
+* **T1 — Stacks and reaping.** Each thread stack is owned by exactly one
+  thread record. A dead thread is claimed by exactly one reaper (removed
+  from the dead list and marked `Reaping` under `SCHED`); the running
+  thread is never reaped. The record is removed from the table and dropped
+  inside one `SCHED` critical section after its stack is freed, so a thread
+  is visible to `state`/`join` until all of its resources are released.
 * **T2 — Fresh threads** start from a prepared frame (`coco_thread_start`)
   with interrupts disabled; kernel bodies enable them first; user threads
   enter ring 3 via `iretq` with IF set and all other GPRs zeroed.

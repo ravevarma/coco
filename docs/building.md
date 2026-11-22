@@ -28,6 +28,8 @@
   timer accuracy and #BP self-tests.
 * `test=heap` — heap churn plus exhaustion/recovery (consumes free frames).
 * `test=threads` — kernel-thread fairness, context-switch cost, 300-thread churn.
+* `test=soak secs=N` — N seconds of process/thread/heap churn; frames and
+  heap must be exactly at baseline after every round.
 * `test=user` — user processes: preemption across processes, 6 fault
   classes killed, 2 syscall fuzzers, 120-process churn, leak checks.
 * (no `test=`) — boots and runs `\coco\init.elf` as pid 1.

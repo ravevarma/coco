@@ -10,6 +10,22 @@ Nothing here claims the system is free of defects.
 Earlier reports: M0/M1 `git show 2f2a915:docs/quality-report.md`,
 M2 `git show 778ece7:docs/quality-report.md`.
 
+## Hardening pass after M3 (revision `c527b49`)
+
+A review of the scheduler, process lifecycle, interrupt and syscall paths,
+plus two new tests, found and fixed:
+
+| Defect | Severity | Evidence / fix |
+|---|---|---|
+| **Reaper/join race**: two concurrent reapers (idle thread, `join` caller); a reaper preempted after removing a dead thread's record but before dropping it let `join` return while 640 B (thread record + FPU area) were still held | medium (breaks `join`'s resource guarantee; transient, not a permanent leak) | Found by the new 60 s soak test (failed 2 of 3 runs at rounds 468 and 3,293; diagnostics showed a clean scheduler with +640 B heap). Fixed with a `Reaping` state and an atomic remove+drop under `SCHED`; soak then passed 4 of 4 runs (≈24,000 rounds, ≈216,000 processes, ≈96,000 threads, frames and heap exact every round) |
+| **Process-start race**: user thread queued before its id was recorded in the process; a third party waiting on the process could have joined thread 0 | medium (latent: only the spawner waits today) | Threads are now created stopped, registered, then started |
+| **Vector overlap**: masked PIC remapped onto 0x20–0x2F, aliasing the APIC timer vector 0x20 | low | PIC remapped to 0x30–0x3F |
+| `sched::init` not idempotent | low | second call refused |
+
+New coverage: user mode on a CPU without SMEP/SMAP (`-cpu qemu64`, plain
+copy path) and the 60 s soak. After the fixes: 8/8 static gates and
+**32 cases / 34 runs** pass in QEMU.
+
 ## Environment
 
 | Item | Version |
@@ -102,9 +118,8 @@ U1–U3 (user memory, return to user, fault containment).
 | Item | Reason |
 |---|---|
 | x2APIC register path; HPET fallback | not available under QEMU 8.2 TCG / q35 |
-| User mode on a CPU without SMAP (non-STAC copy path) | user tests run with `-cpu max` only |
 | Multi-threaded processes, IPC, capabilities | not implemented (M3 follow-ups / M4) |
-| Long-duration soak | not run |
+| Soak longer than 60 s | not run (the test takes `secs=N`) |
 | Physical hardware, Secure Boot | unavailable |
 | Dependency advisory scan | no tool installed; zero third-party crates ship |
 
