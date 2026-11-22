@@ -11,17 +11,20 @@
 pub mod cmdline;
 pub mod layout;
 pub mod memory;
+pub mod syscall;
 
 pub use memory::{MemoryKind, MemoryRegion, RegionError};
 
 /// `b"cocoBOOT"` read as a little-endian `u64`.
 pub const BOOT_INFO_MAGIC: u64 = u64::from_le_bytes(*b"cocoBOOT");
 /// Bumped on every incompatible change to [`BootInfo`].
-pub const BOOT_INFO_VERSION: u32 = 1;
+pub const BOOT_INFO_VERSION: u32 = 2;
 /// Upper bound on memory regions accepted by the kernel.
 pub const MAX_MEMORY_REGIONS: u64 = 1024;
 /// Upper bound on the command-line length in bytes.
 pub const MAX_CMDLINE_LEN: u64 = 1024;
+/// Upper bound on the initial user program image.
+pub const MAX_INIT_IMAGE: u64 = 16 << 20;
 
 /// Pixel layouts the loader may report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -127,6 +130,11 @@ pub struct BootInfo {
     pub tsc_handoff: u64,
     /// See [`flags`].
     pub flags: u64,
+    /// Virtual address (direct map) of the initial user program ELF image,
+    /// or 0 if none was loaded.
+    pub init_image: u64,
+    /// Length of the initial user program image in bytes.
+    pub init_image_len: u64,
 }
 
 /// Reasons a [`BootInfo`] is rejected.
@@ -154,6 +162,8 @@ pub enum BootInfoError {
     BadStack,
     /// Direct map description inconsistent with the fixed layout.
     BadDirectMap,
+    /// Initial program image pointer/length invalid.
+    BadInitImage,
 }
 
 impl BootInfo {
@@ -196,6 +206,11 @@ impl BootInfo {
             || (self.cmdline_len > 0 && !self.in_direct_map(self.cmdline, self.cmdline_len))
         {
             return Err(BootInfoError::BadCmdline);
+        }
+        if self.init_image_len > MAX_INIT_IMAGE
+            || (self.init_image_len > 0 && !self.in_direct_map(self.init_image, self.init_image_len))
+        {
+            return Err(BootInfoError::BadInitImage);
         }
         if self.stack_bottom >= self.stack_top
             || !self.stack_bottom.is_multiple_of(layout::PAGE_SIZE)

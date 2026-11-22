@@ -54,12 +54,20 @@ name = "coco-elf"
 version = "0.1.0"
 
 [[package]]
+name = "coco-init"
+version = "0.1.0"
+dependencies = [
+ "coco-abi",
+]
+
+[[package]]
 name = "coco-kernel"
 version = "0.1.0"
 dependencies = [
  "coco-abi",
  "coco-acpi",
  "coco-arch-x86_64",
+ "coco-elf",
  "coco-memory",
  "coco-sync",
 ]

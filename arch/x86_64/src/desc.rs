@@ -4,6 +4,13 @@
 pub const KERNEL_CODE: u64 = 0x00AF_9A00_0000_FFFF;
 /// Kernel data segment (P=1, DPL=0, read/write).
 pub const KERNEL_DATA: u64 = 0x00CF_9200_0000_FFFF;
+/// 32-bit user code segment (DPL=3). Unused, but SYSRET's selector
+/// arithmetic requires the slot (`STAR[63:48]` points here).
+pub const USER_CODE32: u64 = 0x00CF_FA00_0000_FFFF;
+/// User data segment (P=1, DPL=3, read/write).
+pub const USER_DATA: u64 = 0x00CF_F200_0000_FFFF;
+/// 64-bit user code segment (L=1, P=1, DPL=3).
+pub const USER_CODE64: u64 = 0x00AF_FA00_0000_FFFF;
 
 /// Encodes a 64-bit available TSS descriptor (two GDT slots).
 #[must_use]
@@ -145,5 +152,11 @@ mod tests {
         assert_eq!((KERNEL_CODE >> 47) & 1, 1);
         assert_eq!((KERNEL_DATA >> 47) & 1, 1);
         assert_eq!(core::mem::size_of::<DescriptorTablePointer>(), 10);
+        // DPL 3 (bits 45-46) on all user segments; L bit only on 64-bit code.
+        for d in [USER_CODE32, USER_DATA, USER_CODE64] {
+            assert_eq!((d >> 45) & 3, 3);
+        }
+        assert_eq!((USER_CODE64 >> 53) & 3, 1);
+        assert_eq!((USER_CODE32 >> 53) & 1, 0);
     }
 }

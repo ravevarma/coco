@@ -17,8 +17,11 @@ mod heap;
 mod interrupts;
 mod mm;
 mod power;
+mod process;
+mod sched;
 mod selftest;
 mod sync;
+mod syscall;
 
 use alloc::boxed::Box;
 
@@ -186,6 +189,24 @@ fn kernel_main(boot_info: u64) -> ! {
         timer.reference,
         if timer.x2apic { "x2APIC" } else { "xAPIC" }
     );
+    let pre = mm::with(|m| m.prepopulate_kernel_half()).and_then(Result::ok);
+    if let Err(e) = sched::init() {
+        kprintln!("FATAL: scheduler init: {:?}", e);
+        fatal_stop();
+    }
+    let init_image: &'static [u8] = if boot.info.init_image_len > 0 {
+        // SAFETY: validated by `validate_header` (inside the direct map,
+        // bounded length); BOOT_INFO memory is never reclaimed or written.
+        unsafe { core::slice::from_raw_parts(boot.info.init_image as *const u8, boot.info.init_image_len as usize) }
+    } else {
+        &[]
+    };
+    kprintln!(
+        "sched: preemptive round-robin at {} Hz, {} kernel PML4 slots pre-populated, init image {} bytes",
+        interrupts::HZ,
+        pre.unwrap_or(0),
+        init_image.len()
+    );
     if cmd.flag("x2apic") && !timer.x2apic {
         kprintln!("apic: x2APIC requested but the CPU does not report it; staying in xAPIC mode");
     }
@@ -213,7 +234,16 @@ fn kernel_main(boot_info: u64) -> ! {
         }
     };
     match cmd.get("test") {
-        None => {}
+        None => {
+            if init_image.is_empty() {
+                kprintln!("init: no \\coco\\init.elf on the boot volume");
+            } else {
+                match process::spawn(init_image, coco_abi::syscall::init_mode::HELLO, 0) {
+                    Ok(pid) => kprintln!("init: started as pid {}, exited with {:?}", pid, process::wait(pid)),
+                    Err(e) => kprintln!("init: failed to start: {:?}", e),
+                }
+            }
+        }
         Some("memory" | "all") => {
             let (pass, fail) = mm::with(|m| selftest::memory_suite(m, nx, &hardening)).unwrap_or((0, 1));
             record("breakpoint", selftest::breakpoint());
@@ -238,6 +268,12 @@ fn kernel_main(boot_info: u64) -> ! {
             record("lifecycle", selftest::lifecycle(acpi, cycles, fail));
         }
         Some("shutdown") => record("shutdown", power::shutdown(acpi)),
+        Some("threads") => record("threads", selftest::threads_suite()),
+        Some("user") => record("user", selftest::user_suite(init_image)),
+        Some("m3") => {
+            record("threads", selftest::threads_suite());
+            record("user", selftest::user_suite(init_image));
+        }
         Some(name) => record(name, selftest::fatal_test(name)),
     }
     console::progress(BOOT_STAGES, BOOT_STAGES);

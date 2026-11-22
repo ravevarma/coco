@@ -30,6 +30,18 @@ pub const BOOT_STACK_TOP: u64 = BOOT_STACK_BOTTOM + BOOT_STACK_SIZE;
 /// Lowest address the kernel image may be linked at.
 pub const KERNEL_IMAGE_BASE: u64 = 0xFFFF_FFFF_8000_0000;
 
+/// Lowest user-space address a program may be linked at (4 MiB; the
+/// first pages stay unmapped to catch null dereferences).
+pub const USER_BASE: u64 = 0x40_0000;
+/// One past the highest user-space address coco hands out.
+pub const USER_TOP: u64 = 0x0000_7FFF_FFFF_F000;
+/// Top of the initial user stack.
+pub const USER_STACK_TOP: u64 = 0x0000_7FFF_FFF0_0000;
+/// Size of the initial user stack (a guard page lies below it).
+pub const USER_STACK_SIZE: u64 = 64 * 1024;
+/// Kernel stack size per thread (a guard page lies below each).
+pub const KERNEL_THREAD_STACK_SIZE: u64 = 32 * 1024;
+
 /// Converts a physical address to its direct-map virtual address.
 #[must_use]
 pub const fn phys_to_virt(phys: u64) -> Option<u64> {

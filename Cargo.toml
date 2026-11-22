@@ -10,6 +10,7 @@ members = [
     "crates/coco-memory",
     "crates/coco-sync",
     "tools/xtask",
+    "user/init",
 ]
 # Host-testable crates. The loader and kernel are built only for their bare-metal
 # targets through `cargo xtask`, never for the host.

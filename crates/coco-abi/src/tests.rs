@@ -48,6 +48,8 @@ fn good_info() -> BootInfo {
         tsc_loader_start: 0,
         tsc_handoff: 0,
         flags: 0,
+        init_image: DIRECT_MAP_BASE + 0x30_0000,
+        init_image_len: 4096,
     }
 }
 
@@ -92,6 +94,23 @@ fn framebuffer_size_overflow_rejected() {
     let mut info = good_info();
     info.framebuffer.virt_base += 4096;
     assert_eq!(info.validate_header(), Err(BootInfoError::BadFramebuffer));
+}
+
+#[test]
+fn init_image_validation() {
+    let mut info = good_info();
+    info.init_image_len = 0;
+    info.init_image = 0;
+    assert_eq!(info.validate_header(), Ok(()));
+    let mut info = good_info();
+    info.init_image = 0x1000;
+    assert_eq!(info.validate_header(), Err(BootInfoError::BadInitImage));
+    let mut info = good_info();
+    info.init_image_len = MAX_INIT_IMAGE + 1;
+    assert_eq!(info.validate_header(), Err(BootInfoError::BadInitImage));
+    let mut info = good_info();
+    info.init_image = u64::MAX - 10;
+    assert_eq!(info.validate_header(), Err(BootInfoError::BadInitImage));
 }
 
 #[test]
@@ -157,7 +176,7 @@ fn abi_layout_is_stable() {
     // Changing these sizes requires bumping BOOT_INFO_VERSION.
     assert_eq!(core::mem::size_of::<MemoryRegion>(), 24);
     assert_eq!(core::mem::size_of::<FramebufferInfo>(), 40);
-    assert_eq!(core::mem::size_of::<BootInfo>(), 152);
+    assert_eq!(core::mem::size_of::<BootInfo>(), 168);
 }
 
 #[test]

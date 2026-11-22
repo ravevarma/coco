@@ -331,3 +331,63 @@ pub unsafe fn inl(port: u16) -> u32 {
     unsafe { asm!("in eax, dx", in("dx") port, out("eax") v, options(nostack, nomem, preserves_flags)) };
     v
 }
+
+/// IA32_STAR (SYSCALL/SYSRET segment selectors).
+pub const MSR_STAR: u32 = 0xC000_0081;
+/// IA32_LSTAR (64-bit SYSCALL entry point).
+pub const MSR_LSTAR: u32 = 0xC000_0082;
+/// IA32_FMASK (RFLAGS bits cleared on SYSCALL).
+pub const MSR_FMASK: u32 = 0xC000_0084;
+/// IA32_KERNEL_GS_BASE (swapped in by `swapgs`).
+pub const MSR_KERNEL_GS_BASE: u32 = 0xC000_0102;
+/// IA32_GS_BASE.
+pub const MSR_GS_BASE: u32 = 0xC000_0101;
+/// EFER.SCE (SYSCALL enable).
+pub const EFER_SCE: u64 = 1;
+/// CR4.OSFXSR (FXSAVE/SSE enabled for the OS).
+pub const CR4_OSFXSR: u64 = 1 << 9;
+/// CR4.OSXMMEXCPT (SIMD exceptions delivered as #XM).
+pub const CR4_OSXMMEXCPT: u64 = 1 << 10;
+/// CR4.FSGSBASE (user-mode RD/WR FS/GS base instructions).
+pub const CR4_FSGSBASE: u64 = 1 << 16;
+/// CR4.OSXSAVE (XSAVE/AVX enabled).
+pub const CR4_OSXSAVE: u64 = 1 << 18;
+/// CR0.EM (x87 emulation; must be clear for FXSAVE).
+pub const CR0_EM: u64 = 1 << 2;
+/// CR0.MP (monitor coprocessor).
+pub const CR0_MP: u64 = 1 << 1;
+
+/// 512-byte FXSAVE area (x87, MMX, SSE state).
+#[derive(Clone, Copy, Debug)]
+#[repr(C, align(16))]
+pub struct FxArea(pub [u8; 512]);
+
+impl FxArea {
+    /// A zeroed area (not a valid image until saved into).
+    pub const ZERO: Self = Self([0; 512]);
+}
+
+/// Saves the x87/SSE state into `area`.
+///
+/// # Safety
+/// CR4.OSFXSR must be set and CR0.EM clear.
+pub unsafe fn fxsave(area: &mut FxArea) {
+    // SAFETY: caller contract; `area` is a valid, 16-byte aligned 512-byte buffer.
+    unsafe { asm!("fxsave64 [{}]", in(reg) area.0.as_mut_ptr(), options(nostack, preserves_flags)) };
+}
+
+/// Restores the x87/SSE state from `area`.
+///
+/// # Safety
+/// As for [`fxsave`]; `area` must hold an image produced by `fxsave`
+/// (reserved MXCSR bits clear), otherwise #GP.
+pub unsafe fn fxrstor(area: &FxArea) {
+    // SAFETY: caller contract.
+    unsafe { asm!("fxrstor64 [{}]", in(reg) area.0.as_ptr(), options(nostack, preserves_flags)) };
+}
+
+/// Resets the x87 FPU to its default state.
+pub fn fninit() {
+    // SAFETY: fninit only resets FPU control/status state.
+    unsafe { asm!("fninit", options(nostack, nomem, preserves_flags)) };
+}

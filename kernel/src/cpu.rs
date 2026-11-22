@@ -10,7 +10,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use coco_abi::layout::{BOOT_STACK_GUARD, PAGE_SIZE};
 use coco_arch::cpu;
-use coco_arch::desc::{DescriptorTablePointer, Gate, KERNEL_CODE, KERNEL_DATA, Tss, tss_descriptor};
+use coco_arch::desc::{
+    DescriptorTablePointer, Gate, KERNEL_CODE, KERNEL_DATA, Tss, USER_CODE32, USER_CODE64, USER_DATA, tss_descriptor,
+};
 
 use crate::kprintln_emergency;
 
@@ -19,7 +21,13 @@ pub const KERNEL_CS: u16 = 0x08;
 /// Kernel data selector.
 pub const KERNEL_DS: u16 = 0x10;
 /// TSS selector.
-pub const TSS_SEL: u16 = 0x18;
+pub const TSS_SEL: u16 = 0x30;
+/// SYSRET selector base (STAR[63:48]); user SS = base+8, user CS = base+16.
+pub const USER_SELECTOR_BASE: u16 = 0x18;
+/// User data selector with RPL 3.
+pub const USER_DS: u16 = 0x20 | 3;
+/// User 64-bit code selector with RPL 3.
+pub const USER_CS: u16 = 0x28 | 3;
 
 const IST_STACK_SIZE: usize = 16 * 1024;
 const IST_DOUBLE_FAULT: u8 = 1;
@@ -28,7 +36,7 @@ const IST_MACHINE_CHECK: u8 = 3;
 
 #[repr(C, align(16))]
 struct CpuTables {
-    gdt: [u64; 5],
+    gdt: [u64; 8],
     tss: Tss,
     idt: [Gate; 256],
 }
@@ -75,7 +83,7 @@ struct TablesCell(UnsafeCell<CpuTables>);
 unsafe impl Sync for TablesCell {}
 
 static CPU0: TablesCell =
-    TablesCell(UnsafeCell::new(CpuTables { gdt: [0; 5], tss: Tss::new(), idt: [Gate::MISSING; 256] }));
+    TablesCell(UnsafeCell::new(CpuTables { gdt: [0; 8], tss: Tss::new(), idt: [Gate::MISSING; 256] }));
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
 /// Number of #BP exceptions handled (observable by self-tests).
 pub static BREAKPOINTS: AtomicU64 = AtomicU64::new(0);
@@ -325,7 +333,7 @@ pub fn init() -> Result<Hardening, CpuInitError> {
 
     let tss_addr = core::ptr::addr_of!(t.tss) as u64;
     let [tss_lo, tss_hi] = tss_descriptor(tss_addr, (core::mem::size_of::<Tss>() - 1) as u32);
-    t.gdt = [0, KERNEL_CODE, KERNEL_DATA, tss_lo, tss_hi];
+    t.gdt = [0, KERNEL_CODE, KERNEL_DATA, USER_CODE32, USER_DATA, USER_CODE64, tss_lo, tss_hi];
 
     // SAFETY: `coco_trap_stubs` is an immutable table emitted by the
     // global_asm block above.
@@ -401,10 +409,75 @@ pub fn init() -> Result<Hardening, CpuInitError> {
     if f.umip {
         cr4 |= cpu::CR4_UMIP;
     }
-    // SAFETY: only features CPUID reports are enabled. No user-mode pages
-    // exist, so SMEP/SMAP cannot fault kernel code; UMIP affects CPL 3 only.
+    // x87/SSE are available to user mode and saved per thread with
+    // FXSAVE; XSAVE-managed state (AVX...) and FSGSBASE are kept disabled
+    // because the per-thread save area does not cover them.
+    cr4 |= cpu::CR4_OSFXSR | cpu::CR4_OSXMMEXCPT;
+    cr4 &= !(cpu::CR4_OSXSAVE | cpu::CR4_FSGSBASE);
+    // SAFETY: only features CPUID reports are enabled. SMEP/SMAP cannot
+    // fault the kernel (it touches user pages only inside STAC/CLAC
+    // windows); UMIP affects CPL 3 only; the kernel itself never uses
+    // SIMD/AVX (soft-float target).
     unsafe { cpu::write_cr4(cr4) };
+    // SAFETY: CR0.EM clear / MP set is the documented FXSAVE/SSE setup.
+    unsafe { cpu::write_cr0((cpu::read_cr0() & !cpu::CR0_EM) | cpu::CR0_MP) };
+    init_syscall_msrs();
     Ok(hardening)
+}
+
+/// Per-CPU data reached with `swapgs` from the syscall entry stub:
+/// offset 0 = kernel stack top of the current thread, offset 8 = scratch
+/// for the user RSP.
+///
+/// Invariant (C5): written only with interrupts disabled (context switch);
+/// read by the syscall stub with interrupts disabled (FMASK clears IF).
+struct PerCpu(UnsafeCell<[u64; 2]>);
+
+// SAFETY: invariant C5 — single CPU, accesses serialized by disabled
+// interrupts.
+unsafe impl Sync for PerCpu {}
+
+static PER_CPU: PerCpu = PerCpu(UnsafeCell::new([0; 2]));
+
+fn init_syscall_msrs() {
+    let star = (u64::from(USER_SELECTOR_BASE) << 48) | (u64::from(KERNEL_CS) << 32);
+    // RFLAGS cleared on entry: TF, IF, DF, IOPL, NT, AC (AC so user code
+    // cannot pre-disable SMAP for the kernel).
+    let fmask: u64 = 0x0004_7700;
+    let entry = crate::syscall::entry_address();
+    // SAFETY: EFER exists on every x86_64 CPU; CPL 0.
+    let efer = unsafe { cpu::rdmsr(cpu::MSR_EFER) };
+    // SAFETY: CPL 0; this and the MSR writes below only configure
+    // SYSCALL/SYSRET and the GS bases. The entry point is the assembly stub
+    // in `syscall.rs`, and PER_CPU is a static.
+    unsafe { cpu::wrmsr(cpu::MSR_EFER, efer | cpu::EFER_SCE) };
+    // SAFETY: as above.
+    unsafe { cpu::wrmsr(cpu::MSR_STAR, star) };
+    // SAFETY: as above.
+    unsafe { cpu::wrmsr(cpu::MSR_LSTAR, entry) };
+    // SAFETY: as above.
+    unsafe { cpu::wrmsr(cpu::MSR_FMASK, fmask) };
+    // SAFETY: as above.
+    unsafe { cpu::wrmsr(cpu::MSR_KERNEL_GS_BASE, PER_CPU.0.get() as u64) };
+    // SAFETY: as above.
+    unsafe { cpu::wrmsr(cpu::MSR_GS_BASE, 0) };
+}
+
+/// Installs `top` as the stack used on entry to ring 0 (interrupts from
+/// user mode via TSS.RSP0, and syscalls via the per-CPU slot).
+/// Must be called with interrupts disabled (context switch).
+pub fn set_kernel_stack(top: u64) {
+    let tables = CPU0.0.get();
+    // SAFETY: invariant C1 (amended): TSS.RSP0 is the one field updated
+    // after `init`, only here, with interrupts disabled on the only CPU.
+    // The TSS is packed, so the field is written unaligned through a raw
+    // pointer without creating a reference.
+    let rsp0 = unsafe { core::ptr::addr_of_mut!((*tables).tss.rsp) }.cast::<u64>();
+    // SAFETY: as above; `rsp0` points at TSS.RSP0 inside the static.
+    unsafe { rsp0.write_unaligned(top) };
+    let slot = PER_CPU.0.get().cast::<u64>();
+    // SAFETY: invariant C5; offset 0 of the per-CPU block.
+    unsafe { slot.write(top) };
 }
 
 fn exception_name(vector: u64) -> &'static str {
@@ -450,6 +523,19 @@ extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
             IN_INTERRUPT.fetch_add(1, Ordering::Relaxed);
             crate::interrupts::handle(v as u8);
             IN_INTERRUPT.fetch_sub(1, Ordering::Relaxed);
+            if v == u64::from(crate::interrupts::TIMER_VECTOR) {
+                // Preemption point: no locks are held (IrqSpinLock holders
+                // run with interrupts disabled, so the tick cannot land
+                // inside them) and the interrupted state is in `frame`
+                // on this thread's own kernel stack.
+                crate::sched::preempt();
+            }
+        }
+        _ if frame.cs & 3 == 3 => {
+            // Isolation: an exception raised in user mode terminates the
+            // offending process; the kernel continues.
+            let cr2 = if frame.vector == 14 { cpu::read_cr2() } else { 0 };
+            crate::process::kill_current(exception_name(frame.vector), frame.rip, cr2, frame.error_code)
         }
         _ => fatal_exception(frame),
     }

@@ -279,7 +279,8 @@ pub fn init(acpi: Option<&AcpiInfo>, force_x2apic: bool) -> Result<TimerInfo, Ir
 pub fn handle(vector: u8) {
     match vector {
         TIMER_VECTOR => {
-            TICKS.fetch_add(1, Ordering::Relaxed);
+            let now = TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+            crate::sched::tick(now);
             if ALLOC_IN_IRQ_TEST.load(Ordering::Relaxed) {
                 // Deliberate rule violation for the self-test: must be refused.
                 let b = alloc::boxed::Box::new(0xC0C0_u64);

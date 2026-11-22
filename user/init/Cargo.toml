@@ -1,0 +1,20 @@
+[package]
+name = "coco-init"
+description = "coco's initial user-space program (also the user-mode test workload)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "coco-init"
+test = false
+bench = false
+
+[dependencies]
+coco-abi.workspace = true
+
+[lints]
+workspace = true

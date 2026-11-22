@@ -30,8 +30,8 @@ use coco_abi::layout::{
 };
 use coco_abi::memory::{kind_from_uefi, normalize, uefi_types};
 use coco_abi::{
-    BOOT_INFO_MAGIC, BOOT_INFO_VERSION, BootInfo, FramebufferInfo, MAX_CMDLINE_LEN, MAX_MEMORY_REGIONS, MemoryKind,
-    MemoryRegion, PixelFormat, RegionError, flags,
+    BOOT_INFO_MAGIC, BOOT_INFO_VERSION, BootInfo, FramebufferInfo, MAX_CMDLINE_LEN, MAX_INIT_IMAGE, MAX_MEMORY_REGIONS,
+    MemoryKind, MemoryRegion, PixelFormat, RegionError, flags,
 };
 use coco_arch::cpu;
 use coco_elf::{ElfError, Executable, Policy};
@@ -40,6 +40,7 @@ use uefi::{BootServices, FileProtocol, Handle, MemoryDescriptor, Status, SystemT
 
 const KERNEL_PATH: [u16; 17] = uefi::ucs2("\\coco\\kernel.elf");
 const CMDLINE_PATH: [u16; 18] = uefi::ucs2("\\coco\\cmdline.txt");
+const INIT_PATH: [u16; 15] = uefi::ucs2("\\coco\\init.elf");
 /// Largest kernel file the loader will read.
 const MAX_KERNEL_FILE: u64 = 32 << 20;
 /// Upper bound on the loaded kernel's memory footprint.
@@ -469,7 +470,21 @@ fn prepare(fw: &Firmware, tsc_start: u64) -> Result<Prepared, LoaderError> {
     let (kfile, klen) = fw.read_file(&root, &KERNEL_PATH, MAX_KERNEL_FILE)?.ok_or(LoaderError::MissingKernel)?;
     log!("coco-boot: kernel.elf {} bytes", klen);
     let cmdline = fw.read_file(&root, &CMDLINE_PATH, MAX_CMDLINE_LEN)?;
+    let init = fw.read_file(&root, &INIT_PATH, MAX_INIT_IMAGE)?;
     root.close();
+    // The initial user program is copied into BOOT_INFO memory, which the
+    // kernel never reclaims (the file buffer is reclaimable loader data).
+    let (init_phys, init_len) = match init {
+        Some((buf, len)) if len > 0 => {
+            let dst = fw.alloc_pages(uefi_types::BOOT_INFO, len.div_ceil(PAGE_SIZE))?;
+            // SAFETY: `read_file` filled `len` bytes at `buf`; `dst` is a
+            // fresh allocation of at least `len` bytes.
+            unsafe { ptr::copy_nonoverlapping(buf as *const u8, dst as *mut u8, len as usize) };
+            log!("coco-boot: init.elf {} bytes", len);
+            (dst, len)
+        }
+        _ => (0, 0),
+    };
 
     // SAFETY: `read_file` filled `klen` bytes at `kfile` in pages we own;
     // nothing else writes them while this slice lives.
@@ -604,6 +619,8 @@ fn prepare(fw: &Firmware, tsc_start: u64) -> Result<Prepared, LoaderError> {
         tsc_loader_start: tsc_start,
         tsc_handoff: 0,
         flags: bflags,
+        init_image: if init_len > 0 { DIRECT_MAP_BASE + init_phys } else { 0 },
+        init_image_len: init_len,
     };
     // SAFETY: `info` is a fresh, page-aligned, zeroed BOOT_INFO allocation
     // large enough for the header.

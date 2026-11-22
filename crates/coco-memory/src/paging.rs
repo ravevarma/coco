@@ -85,7 +85,7 @@ impl core::ops::BitOr for PageFlags {
 }
 
 /// Supported leaf sizes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PageSize {
     /// 4 KiB.
     Size4K,
@@ -386,5 +386,59 @@ impl<A: PhysAccess> Mapper<A> {
     /// (CR3 reload) and the caller takes ownership of any detached tables.
     pub unsafe fn set_root_entry(&mut self, idx: usize, value: u64) {
         self.write(self.root, idx, value);
+    }
+
+    /// Removes every mapping reachable from PML4 slots `slots` and hands
+    /// out the frames: `leaf` receives each mapped page (physical base and
+    /// size), `table` receives each page-table frame below the root
+    /// (level 3, 2 and 1 tables). The root entries are cleared.
+    ///
+    /// # Safety
+    /// The slots must belong exclusively to the address space being torn
+    /// down (never shared kernel slots), no CPU may be using this address
+    /// space afterwards without a TLB flush, and the callbacks become the
+    /// owners of the frames they receive.
+    pub unsafe fn teardown_slots(
+        &mut self,
+        slots: core::ops::Range<usize>,
+        leaf: &mut dyn FnMut(u64, PageSize),
+        table: &mut dyn FnMut(u64),
+    ) {
+        for slot in slots.start.min(ENTRIES)..slots.end.min(ENTRIES) {
+            let l4 = self.read(self.root, slot);
+            if l4 & PageFlags::PRESENT.0 == 0 {
+                continue;
+            }
+            let pdpt = l4 & ADDR_MASK;
+            for i3 in 0..ENTRIES {
+                let l3 = self.read(pdpt, i3);
+                if l3 & PageFlags::PRESENT.0 == 0 || l3 & PageFlags::HUGE.0 != 0 {
+                    // 1 GiB leaves are never created by this mapper.
+                    continue;
+                }
+                let pd = l3 & ADDR_MASK;
+                for i2 in 0..ENTRIES {
+                    let l2 = self.read(pd, i2);
+                    if l2 & PageFlags::PRESENT.0 == 0 {
+                        continue;
+                    }
+                    if l2 & PageFlags::HUGE.0 != 0 {
+                        leaf(l2 & ADDR_MASK & !PageSize::Size2M.offset_mask(), PageSize::Size2M);
+                        continue;
+                    }
+                    let pt = l2 & ADDR_MASK;
+                    for i1 in 0..ENTRIES {
+                        let l1 = self.read(pt, i1);
+                        if l1 & PageFlags::PRESENT.0 != 0 {
+                            leaf(l1 & ADDR_MASK, PageSize::Size4K);
+                        }
+                    }
+                    table(pt);
+                }
+                table(pd);
+            }
+            table(pdpt);
+            self.write(self.root, slot, 0);
+        }
     }
 }

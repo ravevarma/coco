@@ -39,10 +39,23 @@ fn home_dir(var: &str, fallback: &str) -> String {
 
 /// Encoded rustflags: target-specific codegen flags plus path remapping so
 /// artifacts do not depend on the checkout location or home directory.
-fn rustflags(root: &Path, kernel: bool) -> String {
+/// Code-generation flavour of a bare-metal artifact.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Flavor {
+    /// UEFI PE application.
+    Uefi,
+    /// Kernel: static, linked in the top 2 GiB.
+    Kernel,
+    /// User program: static, linked low (small code model).
+    User,
+}
+
+fn rustflags(root: &Path, flavor: Flavor) -> String {
     let mut flags: Vec<String> = Vec::new();
-    if kernel {
-        flags.extend(["-C", "relocation-model=static", "-C", "code-model=kernel"].map(String::from));
+    match flavor {
+        Flavor::Kernel => flags.extend(["-C", "relocation-model=static", "-C", "code-model=kernel"].map(String::from)),
+        Flavor::User => flags.extend(["-C", "relocation-model=static"].map(String::from)),
+        Flavor::Uefi => {}
     }
     flags.push(format!("--remap-path-prefix={}=/coco", root.display()));
     flags.push(format!("--remap-path-prefix={}=/cargo", home_dir("CARGO_HOME", ".cargo")));
@@ -58,13 +71,13 @@ fn cargo(root: &Path) -> Command {
     c
 }
 
-fn build_one(root: &Path, package: &str, target: &str, release: bool, kernel: bool) -> Res<()> {
+fn build_one(root: &Path, package: &str, target: &str, release: bool, flavor: Flavor) -> Res<()> {
     let mut c = cargo(root);
     c.args(["build", "--locked", "-p", package, "--target", target]);
     if release {
         c.arg("--release");
     }
-    c.env("CARGO_ENCODED_RUSTFLAGS", rustflags(root, kernel));
+    c.env("CARGO_ENCODED_RUSTFLAGS", rustflags(root, flavor));
     run(&mut c)
 }
 
@@ -114,10 +127,24 @@ pub fn make_esp(esp_dir: &Path, img: &Path) -> Res<()> {
     Ok(())
 }
 
+fn build_user(root: &Path, release: bool) -> Res<()> {
+    let mut c = cargo(root);
+    c.args(["build", "--locked", "-p", "coco-init", "--target", "x86_64-unknown-none", "--target-dir", "target/user"]);
+    if release {
+        c.arg("--release");
+    }
+    c.env("CARGO_ENCODED_RUSTFLAGS", rustflags(root, Flavor::User));
+    run(&mut c)
+}
+
 /// Builds loader and kernel, assembles `target/coco/{esp,esp.img,coco.img}`.
 pub fn build(root: &Path, release: bool) -> Res<Outputs> {
-    build_one(root, "coco-boot", "x86_64-unknown-uefi", release, false)?;
-    build_one(root, "coco-kernel", "x86_64-unknown-none", release, true)?;
+    build_one(root, "coco-boot", "x86_64-unknown-uefi", release, Flavor::Uefi)?;
+    build_one(root, "coco-kernel", "x86_64-unknown-none", release, Flavor::Kernel)?;
+    // The user program shares the bare-metal target directory with the
+    // kernel but needs different codegen flags; a separate target dir keeps
+    // the two builds from invalidating each other.
+    build_user(root, release)?;
     let profile = if release { "release" } else { "debug" };
     let target = root.join("target");
     let out = target.join("coco");
@@ -127,6 +154,7 @@ pub fn build(root: &Path, release: bool) -> Res<Outputs> {
     let kernel = esp_dir.join("coco/kernel.elf");
     copy(&target.join(format!("x86_64-unknown-uefi/{profile}/coco-boot.efi")), &loader)?;
     copy(&target.join(format!("x86_64-unknown-none/{profile}/coco-kernel")), &kernel)?;
+    copy(&target.join(format!("user/x86_64-unknown-none/{profile}/coco-init")), &esp_dir.join("coco/init.elf"))?;
     for d in ["EFI/BOOT", "EFI", "coco"] {
         run(Command::new("touch").arg("-d").arg(format!("@{SOURCE_DATE_EPOCH}")).arg(esp_dir.join(d)))?;
     }
@@ -163,6 +191,24 @@ pub fn check(root: &Path) -> Res<()> {
                 "--target",
                 "x86_64-unknown-uefi",
                 "--release",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            vec![],
+        ),
+        (
+            "clippy (coco-init, x86_64-unknown-none)",
+            vec![
+                "clippy",
+                "--locked",
+                "-p",
+                "coco-init",
+                "--target",
+                "x86_64-unknown-none",
+                "--release",
+                "--target-dir",
+                "target/user",
                 "--",
                 "-D",
                 "warnings",

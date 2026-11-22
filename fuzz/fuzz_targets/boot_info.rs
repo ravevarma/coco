@@ -34,14 +34,18 @@ fuzz_target!(|data: &[u8]| {
         tsc_loader_start: 0,
         tsc_handoff: 0,
         flags: 0,
+        init_image: word(data, 12),
+        init_image_len: word(data, 13),
     };
     if info.validate_header().is_ok() {
         // Accepted pointers must lie inside the direct map.
         let bytes = info.memory_region_count * 24;
         assert!(info.in_direct_map(info.memory_regions, bytes));
         assert!(info.cmdline_len == 0 || info.in_direct_map(info.cmdline, info.cmdline_len));
+        assert!(info.init_image_len <= coco_abi::MAX_INIT_IMAGE);
+        assert!(info.init_image_len == 0 || info.in_direct_map(info.init_image, info.init_image_len));
     }
-    let tail = data.get(96..).unwrap_or(&[]);
+    let tail = data.get(112..).unwrap_or(&[]);
     if let Ok(text) = BootInfo::validate_cmdline(tail) {
         let c = Cmdline::new(text);
         let _ = c.get("test");

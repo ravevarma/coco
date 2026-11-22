@@ -472,3 +472,180 @@ pub fn lifecycle(acpi: Option<&coco_acpi::AcpiInfo>, cycles: u8, prior_failures:
     power::shutdown(acpi)?;
     Err("power-off did not happen")
 }
+
+fn free_frames() -> u64 {
+    crate::mm::with(|m| m.frames.free_frames()).unwrap_or(0)
+}
+
+/// Kernel threads: yielders and pure spinners must all make progress
+/// (spinners only via preemption) with fair shares; context-switch cost is
+/// measured; 300 spawn/join cycles must return frames and heap exactly.
+pub fn threads_suite() -> TestResult {
+    use crate::sched;
+    use core::sync::atomic::{AtomicBool, AtomicU64};
+    static COUNTERS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+    static STOP: AtomicBool = AtomicBool::new(false);
+    static PING: AtomicU64 = AtomicU64::new(0);
+
+    // Warm-up: creates the page tables backing the first stack slots.
+    let warm = sched::spawn_kernel("warm-up", || {}).map_err(|_| "spawn failed")?;
+    sched::join(warm);
+    let frames0 = free_frames();
+    let heap0 = heap_in_use();
+
+    // Fixed-size bookkeeping so the test itself does not skew the heap
+    // baseline.
+    let mut tids = [0u64; 4];
+    for i in 0..4usize {
+        let tid = sched::spawn_kernel(if i < 2 { "yielder" } else { "spinner" }, move || {
+            while !STOP.load(Ordering::Relaxed) {
+                COUNTERS[i].fetch_add(1, Ordering::Relaxed);
+                if i < 2 {
+                    sched::yield_now();
+                } else {
+                    core::hint::spin_loop(); // never yields: needs preemption
+                }
+            }
+        })
+        .map_err(|_| "spawn failed")?;
+        ensure(sched::name(tid) == Some(if i < 2 { "yielder" } else { "spinner" }), "thread record mismatch")?;
+        tids[i] = tid;
+    }
+    ensure(sched::current() == 0, "self-test is not running on kernel-main")?;
+    let (_, switches0) = sched::stats();
+    sched::sleep(30);
+    STOP.store(true, Ordering::Relaxed);
+    for t in tids {
+        sched::join(t);
+    }
+    let (_, switches_phase1) = sched::stats();
+    let c: [u64; 4] = core::array::from_fn(|i| COUNTERS[i].load(Ordering::Relaxed));
+    ensure(c.iter().all(|&v| v > 0), "a thread made no progress")?;
+    let (s_min, s_max) = (c[2].min(c[3]), c[2].max(c[3]));
+    ensure(s_min * 3 >= s_max, "spinner shares unfair (>3x apart)")?;
+
+    // Context-switch cost: two threads alternating with yield.
+    let start = cpu::rdtsc();
+    let (_, sw_before) = sched::stats();
+    let a = sched::spawn_kernel("ping", || {
+        for _ in 0..5000 {
+            PING.fetch_add(1, Ordering::Relaxed);
+            sched::yield_now();
+        }
+    })
+    .map_err(|_| "spawn failed")?;
+    let b = sched::spawn_kernel("pong", || {
+        for _ in 0..5000 {
+            PING.fetch_add(1, Ordering::Relaxed);
+            sched::yield_now();
+        }
+    })
+    .map_err(|_| "spawn failed")?;
+    sched::join(a);
+    sched::join(b);
+    let cycles = cpu::rdtsc() - start;
+    let (_, sw_after) = sched::stats();
+    let per_switch = cycles / (sw_after - sw_before).max(1);
+
+    // Churn: create/destroy many threads.
+    static CHURN: AtomicU64 = AtomicU64::new(0);
+    for _ in 0..300 {
+        let t = sched::spawn_kernel("churn", || {
+            CHURN.fetch_add(1, Ordering::Relaxed);
+        })
+        .map_err(|_| "spawn failed")?;
+        sched::join(t);
+    }
+    ensure(CHURN.load(Ordering::Relaxed) == 300, "churn threads did not all run")?;
+    sched::reap();
+    let (threads, switches) = sched::stats();
+    ensure(free_frames() == frames0, "frames leaked by thread lifecycle")?;
+    ensure(heap_in_use() == heap0, "heap leaked by thread lifecycle")?;
+    kprintln!(
+        "  threads: counters {:?}, spinner fairness {}:{}, {} switches in 30 ticks; switch cost {} cyc ({} ns); 300 spawn/join ok; live threads {}, total switches {}",
+        c,
+        s_min,
+        s_max,
+        switches_phase1 - switches0,
+        per_switch,
+        per_switch * 1_000_000_000 / interrupts::tsc_hz().max(1),
+        threads,
+        switches
+    );
+    Ok(())
+}
+
+/// User mode: well-behaved programs run and exit, preemption works across
+/// processes, every misbehaving program is killed while the kernel keeps
+/// running, hostile syscalls are rejected, and process churn returns all
+/// frames and heap memory.
+pub fn user_suite(image: &[u8]) -> TestResult {
+    use crate::process::{self, Status};
+    use coco_abi::syscall::init_mode as m;
+    ensure(!image.is_empty(), "no init.elf loaded")?;
+    let run = |mode: u64, arg: u64| -> Result<Status, &'static str> {
+        let pid = process::spawn(image, mode, arg).map_err(|_| "spawn failed")?;
+        process::wait(pid).ok_or("wait failed")
+    };
+    // Warm-up (creates shared kernel tables for stack slots).
+    ensure(run(m::HELLO, 0)? == Status::Exited(0), "hello did not exit(0)")?;
+    let frames0 = free_frames();
+    let heap0 = heap_in_use();
+
+    // Preemption across processes: a spinner that never yields must not
+    // stop a second process from finishing first.
+    let spin = process::spawn(image, m::SPIN, 30).map_err(|_| "spawn failed")?;
+    let hello = process::spawn(image, m::HELLO, 0).map_err(|_| "spawn failed")?;
+    ensure(process::wait(hello) == Some(Status::Exited(0)), "hello failed beside spinner")?;
+    let hello_done = interrupts::ticks();
+    ensure(process::wait(spin) == Some(Status::Exited(0)), "spinner failed")?;
+    let spin_done = interrupts::ticks();
+    ensure(hello_done < spin_done, "no preemption between processes")?;
+
+    let faults: [(&str, u64, &str); 6] = [
+        ("null dereference", m::FAULT_NULL, "PAGE FAULT"),
+        ("kernel memory read", m::FAULT_KERNEL_READ, "PAGE FAULT"),
+        ("privileged instruction", m::FAULT_PRIVILEGED, "general protection"),
+        ("execute stack (NX)", m::FAULT_NX, "PAGE FAULT"),
+        ("write to text (W^X)", m::FAULT_WRITE_TEXT, "PAGE FAULT"),
+        ("user stack overflow", m::FAULT_STACK_OVERFLOW, "PAGE FAULT"),
+    ];
+    for (what, mode, reason) in faults {
+        match run(mode, 0)? {
+            Status::Killed(r) if r.contains(reason) => kprintln!("  user isolation: {what}: killed ({r}) - PASS"),
+            other => {
+                kprintln!("  user isolation: {what}: unexpected {:?}", other);
+                return Err("misbehaving process was not killed as expected");
+            }
+        }
+    }
+    ensure(run(m::SYSCALL_FUZZ, 0xC0C0)? == Status::Exited(0), "syscall fuzz process failed")?;
+    ensure(run(m::SYSCALL_FUZZ, 0x5EED)? == Status::Exited(0), "syscall fuzz process failed")?;
+
+    // Churn: sequential and concurrent create/exit.
+    for i in 0..100u64 {
+        ensure(run(m::EXIT_CODE, i)? == Status::Exited(i), "wrong exit code")?;
+    }
+    let mut pids = Vec::new();
+    for i in 0..20u64 {
+        pids.push((i, process::spawn(image, m::EXIT_CODE, i + 1000).map_err(|_| "spawn failed")?));
+    }
+    for (i, pid) in pids {
+        ensure(process::wait(pid) == Some(Status::Exited(i + 1000)), "wrong concurrent exit code")?;
+    }
+    crate::sched::reap();
+    ensure(process::count() == 0, "process records leaked")?;
+    let frames = free_frames();
+    let heap = heap_in_use();
+    kprintln!(
+        "  user: hello finished at tick {} while spinner ran to tick {}; 6 faulting programs killed; 2 syscall fuzzers survived; 120 processes churned; frames {} -> {}, heap {} -> {} B",
+        hello_done,
+        spin_done,
+        frames0,
+        frames,
+        heap0,
+        heap
+    );
+    ensure(frames == frames0, "frames leaked by process lifecycle")?;
+    ensure(heap == heap0, "heap leaked by process lifecycle")
+}

@@ -8,6 +8,8 @@ use coco_arch::cpu;
 use coco_memory::frame::{FrameAllocator, FrameError, PhysFrame, words_for};
 use coco_memory::paging::{MapError, Mapper, PageFlags, PageSize, PhysAccess, TableFrameSource};
 
+use core::cell::RefCell;
+
 use crate::sync::IrqSpinLock;
 
 /// The kernel's memory managers after [`install`].
@@ -280,5 +282,118 @@ impl KernelMemory {
             }
         }
         true
+    }
+
+    /// Unmaps `[virt, virt + len)` (4 KiB pages) and frees the frames that
+    /// backed it. Pages that are not mapped are skipped.
+    pub fn unmap_and_free(&mut self, virt: u64, len: u64) {
+        for i in 0..len / PAGE_SIZE {
+            if let Ok((phys, _, flush)) = self.mapper.unmap(virt + i * PAGE_SIZE) {
+                cpu::invlpg(flush.addr());
+                // SAFETY: the mapping owned this frame (created by map_fresh
+                // or map_user_page) and was just removed.
+                let _ = self.frames.free(unsafe { PhysFrame::from_raw(phys) });
+            }
+        }
+    }
+
+    /// Allocates a zeroed frame (e.g. a new PML4) and returns its address.
+    pub fn alloc_zeroed_frame(&mut self) -> Option<u64> {
+        let phys = self.frames.allocate().ok()?.into_raw();
+        // SAFETY: freshly allocated, exclusively owned, direct-mapped frame.
+        unsafe { core::ptr::write_bytes(DIRECT_MAP_BASE.wrapping_add(phys) as *mut u8, 0, PAGE_SIZE as usize) };
+        Some(phys)
+    }
+
+    /// Makes every kernel-half PML4 slot (256..512) of the live address
+    /// space present, so process address spaces that copy the kernel half
+    /// share all future kernel mappings. Returns the number of slots added.
+    pub fn prepopulate_kernel_half(&mut self) -> Result<u32, MapError> {
+        let mut added = 0;
+        for slot in 256..512 {
+            if self.mapper.root_entry(slot) & PageFlags::PRESENT.bits() == 0 {
+                let table = self.alloc_zeroed_frame().ok_or(MapError::OutOfFrames)?;
+                // SAFETY: `table` is a zeroed, exclusively owned frame: a
+                // valid empty level-3 table. Adding a non-present-to-present
+                // entry needs no TLB flush. Kernel-only (no USER bit).
+                unsafe {
+                    self.mapper.set_root_entry(slot, table | PageFlags::PRESENT.bits() | PageFlags::WRITABLE.bits())
+                };
+                added += 1;
+            }
+        }
+        Ok(added)
+    }
+
+    /// Creates a new address space: a fresh PML4 whose kernel half is a copy
+    /// of the live one (sharing all kernel tables) and whose user half is
+    /// empty. Returns the PML4's physical address.
+    pub fn new_address_space(&mut self) -> Option<u64> {
+        let root = self.alloc_zeroed_frame()?;
+        let dst = DIRECT_MAP_BASE.wrapping_add(root) as *mut u64;
+        for slot in 256..512usize {
+            let entry = self.mapper.root_entry(slot);
+            // SAFETY: `dst` is the freshly zeroed PML4 frame (512 entries);
+            // `slot < 512`.
+            unsafe { dst.wrapping_add(slot).write(entry) };
+        }
+        Some(root)
+    }
+
+    /// Maps a fresh zeroed frame at `virt` in the address space `root` with
+    /// `flags` (USER is added). Returns the frame's physical address.
+    pub fn map_user_page(&mut self, root: u64, virt: u64, flags: PageFlags) -> Result<u64, MapError> {
+        let phys = self.alloc_zeroed_frame().ok_or(MapError::OutOfFrames)?;
+        // SAFETY: `root` is a process PML4 created by `new_address_space`;
+        // its user half is owned exclusively by that process and only
+        // modified here and in `teardown_user`, under the MEMORY lock.
+        let mut m = unsafe { Mapper::new(root, DirectMap) };
+        match m.map(virt, phys, PageSize::Size4K, flags | PageFlags::USER, &mut AllocatorTables(&mut self.frames)) {
+            Ok(flush) => {
+                // The address space is not live on this CPU while being
+                // built; a stale entry cannot exist for a fresh mapping.
+                flush.ignore();
+                Ok(phys)
+            }
+            Err(e) => {
+                // SAFETY: the mapping failed, so the frame is still ours.
+                let _ = self.frames.free(unsafe { PhysFrame::from_raw(phys) });
+                Err(e)
+            }
+        }
+    }
+
+    /// Translates `virt` in address space `root`.
+    pub fn translate_in(&mut self, root: u64, virt: u64) -> Option<coco_memory::paging::Translation> {
+        // SAFETY: read-only walk of a valid PML4 under the MEMORY lock.
+        let m = unsafe { Mapper::new(root, DirectMap) };
+        m.translate(virt)
+    }
+
+    /// Frees every user page and user page table of address space `root`,
+    /// then the PML4 itself. Returns the number of frames released.
+    ///
+    /// The address space must not be live on any CPU.
+    pub fn teardown_user(&mut self, root: u64) -> u64 {
+        // No heap allocation here: MEMORY is held, and the heap may need
+        // MEMORY to grow (lock order L3). Frames are freed in the callbacks.
+        let frames = RefCell::new((&mut self.frames, 0u64));
+        let release = |p: u64| {
+            let mut f = frames.borrow_mut();
+            // SAFETY: each frame was owned by the torn-down page tables (or
+            // is the PML4 itself); freeing only updates the bitmap, so the
+            // walk can still read tables freed after their children.
+            if f.0.free(unsafe { PhysFrame::from_raw(p) }).is_ok() {
+                f.1 += 1;
+            }
+        };
+        // SAFETY: as in `map_user_page`; slots 0..256 belong only to this
+        // process, and the caller guarantees the space is not live.
+        let mut m = unsafe { Mapper::new(root, DirectMap) };
+        // SAFETY: user slots are private to the process; every frame handed
+        // to the callbacks is released exactly once.
+        unsafe { m.teardown_slots(0..256, &mut |p, _size| release(p), &mut |t| release(t)) };
+        release(root);
+        frames.into_inner().1
     }
 }

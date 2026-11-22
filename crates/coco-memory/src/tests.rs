@@ -568,3 +568,45 @@ fn heap_random_ops_match_model() {
     assert!(h.check_runs());
     assert_eq!(h.stats().allocations, h.stats().frees);
 }
+
+/// Teardown returns exactly the mapped leaves and every table frame the
+/// mapper allocated for those slots, and leaves other slots intact.
+#[test]
+fn teardown_returns_every_frame() {
+    let sim = Sim::new(800);
+    let (mut m, mut fs) = mapper(&sim, 799);
+    let mut rng = Rng(99);
+    let mut mapped = BTreeSet::new();
+    // Kernel-half mapping that must survive.
+    m.map(KBASE, 0x9_9000, PageSize::Size4K, PageFlags::EMPTY, &mut fs).unwrap().ignore();
+    let kernel_tables = fs.handed;
+    for _ in 0..if cfg!(miri) { 60 } else { 600 } {
+        let v = (rng.below(4) << 39) | (rng.below(8) << 30) | (rng.below(64) << 21) | (rng.below(512) << 12);
+        let p = rng.below(1 << 30) << 12;
+        if m.map(v, p, PageSize::Size4K, PageFlags::USER | PageFlags::WRITABLE, &mut fs).is_ok() {
+            mapped.insert(p);
+        }
+    }
+    let v2 = 5u64 << 39;
+    m.map(v2, 0x4000_0000, PageSize::Size2M, PageFlags::USER, &mut fs).unwrap().ignore();
+    let mut leaves = BTreeSet::new();
+    let mut tables = 0u64;
+    // SAFETY: slots 0..256 belong only to this simulated user space.
+    unsafe {
+        m.teardown_slots(
+            0..256,
+            &mut |p, s| {
+                assert!(leaves.insert((p, s)), "leaf reported twice");
+            },
+            &mut |_t| tables += 1,
+        );
+    }
+    let small: BTreeSet<u64> = leaves.iter().filter(|(_, s)| *s == PageSize::Size4K).map(|(p, _)| *p).collect();
+    assert_eq!(small, mapped);
+    assert!(leaves.contains(&(0x4000_0000, PageSize::Size2M)));
+    assert_eq!(tables, fs.handed - kernel_tables, "every user table frame returned");
+    for slot in 0..256 {
+        assert_eq!(m.root_entry(slot), 0);
+    }
+    assert_eq!(m.translate(KBASE).unwrap().phys, 0x9_9000, "kernel half survives");
+}
